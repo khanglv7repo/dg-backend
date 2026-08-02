@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import json
@@ -23,14 +22,18 @@ def test_openmetadata_column_update_uses_targeted_fqn_api_and_reads_back() -> No
             return httpx.Response(200, json={"id": "table-id", "tags": []})
         if "/v1/columns/name/" in request.url.path and request.method == "GET":
             get_column_count += 1
-            tags = [] if get_column_count == 1 else [
-                {
-                    "tagFQN": "PII.Email",
-                    "source": "Classification",
-                    "labelType": "Automated",
-                    "state": "Confirmed",
-                }
-            ]
+            tags = (
+                []
+                if get_column_count == 1
+                else [
+                    {
+                        "tagFQN": "PII.Email",
+                        "source": "Classification",
+                        "labelType": "Automated",
+                        "state": "Confirmed",
+                    }
+                ]
+            )
             return httpx.Response(200, json={"name": "email", "tags": tags})
         if request.method == "PUT":
             return httpx.Response(200, json={"name": "email"})
@@ -39,7 +42,8 @@ def test_openmetadata_column_update_uses_targeted_fqn_api_and_reads_back() -> No
     client = OpenMetadataClient(base_url="http://openmetadata/api", token=None)
     client.client.close()
     client.client = httpx.Client(
-        base_url="http://openmetadata/api", transport=httpx.MockTransport(handler)
+        base_url="http://openmetadata/api",
+        transport=httpx.MockTransport(handler),
     )
 
     observed = client.apply_confirmed_tags(
@@ -49,13 +53,86 @@ def test_openmetadata_column_update_uses_targeted_fqn_api_and_reads_back() -> No
         field_tags={"columns.email": ["PII.Email"]},
     )
     client.assert_confirmed_tags(
-        observed, entity_tags=[], field_tags={"columns.email": ["PII.Email"]}
+        observed,
+        entity_tags=[],
+        field_tags={"columns.email": ["PII.Email"]},
     )
 
     put = next(body for method, _path, body in calls if method == "PUT")
     assert put["tags"][0]["tagFQN"] == "PII.Email"
     assert put["tags"][0]["state"] == "Confirmed"
-    assert any("/v1/columns/name/" in path for method, path, _body in calls if method == "PUT")
+    assert any(
+        "/v1/columns/name/" in path
+        for method, path, _body in calls
+        if method == "PUT"
+    )
+
+
+def test_openmetadata_confirmed_tag_snapshot_uses_live_entity_state() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/v1/tables/name/hive.sales.customers"):
+            return httpx.Response(
+                200,
+                json={
+                    "id": "table-id",
+                    "tags": [
+                        {
+                            "tagFQN": "Sensitivity.Confidential",
+                            "state": "Confirmed",
+                        },
+                        {
+                            "tagFQN": "Lifecycle.Pending",
+                            "state": "Suggested",
+                        },
+                    ],
+                    "columns": [
+                        {
+                            "name": "email",
+                            "tags": [
+                                {
+                                    "tagFQN": "PII.Email",
+                                    "state": "Confirmed",
+                                }
+                            ],
+                        },
+                        {
+                            "name": "mobile_phone",
+                            "tags": [
+                                {
+                                    "tagFQN": "PII.Phone",
+                                    "state": "Suggested",
+                                }
+                            ],
+                        },
+                        {"name": "customer_id", "tags": []},
+                    ],
+                },
+            )
+        return httpx.Response(404)
+
+    client = OpenMetadataClient(base_url="http://openmetadata/api", token=None)
+    client.client.close()
+    client.client = httpx.Client(
+        base_url="http://openmetadata/api",
+        transport=httpx.MockTransport(handler),
+    )
+
+    snapshot = client.get_confirmed_tag_snapshot(
+        entity_type="table",
+        entity_fqn="hive.sales.customers",
+    )
+
+    assert snapshot == {
+        "entity_tags": ["Sensitivity.Confidential"],
+        "field_tags": {"columns.email": ["PII.Email"]},
+        "tags": ["PII.Email", "Sensitivity.Confidential"],
+        "field_paths": {"PII.Email": ["columns.email"]},
+        "all_field_paths": [
+            "columns.customer_id",
+            "columns.email",
+            "columns.mobile_phone",
+        ],
+    }
 
 
 def test_openmetadata_native_tag_suggestion_payload() -> None:
@@ -68,7 +145,8 @@ def test_openmetadata_native_tag_suggestion_payload() -> None:
     client = OpenMetadataClient(base_url="http://openmetadata/api", token=None)
     client.client.close()
     client.client = httpx.Client(
-        base_url="http://openmetadata/api", transport=httpx.MockTransport(handler)
+        base_url="http://openmetadata/api",
+        transport=httpx.MockTransport(handler),
     )
     response = client.create_tag_suggestion(
         entity_type="table",

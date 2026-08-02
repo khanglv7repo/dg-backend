@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import hashlib
@@ -43,21 +42,33 @@ class IntakeService:
             object_type="job",
             object_id=str(job.id),
             correlation_id=request.correlation_id,
-            details={"event_id": request.event_id, "entity_fqn": request.entity_fqn},
+            details={
+                "event_id": request.event_id,
+                "entity_fqn": request.entity_fqn,
+            },
         )
         return job
 
     def accept_confirmed_tag_event(self, request: ConfirmedTagEventRequest):
+        """Enqueue Ranger reconciliation from live OpenMetadata state.
+
+        ``tags`` and ``field_paths`` remain in the request model for backwards
+        compatibility, but enforcement does not trust caller-provided tag state.
+        The worker reads the current Confirmed tags from OpenMetadata before
+        resolving ``config/policies.yaml``.
+        """
+
         resolver = PolicyMappingResolver.from_path(
             self.settings.resolve_path(self.settings.policy_mappings_path)
         )
         logical = json.dumps(
             {
                 "event_id": request.event_id,
+                "entity_type": request.entity_type,
                 "entity_fqn": request.entity_fqn,
-                "tags": sorted(set(request.tags)),
-                "field_paths": request.field_paths,
+                "source": request.source,
                 "policy_version": resolver.configuration_version,
+                "purpose": "refresh-confirmed-tags",
             },
             sort_keys=True,
         )
@@ -66,13 +77,14 @@ class IntakeService:
             job_type=JobType.RECONCILE_RANGER,
             idempotency_key=f"confirmed-tags:{fingerprint}",
             payload={
+                "entity_type": request.entity_type,
                 "entity_fqn": request.entity_fqn,
-                "tags": sorted(set(request.tags)),
-                "field_paths": request.field_paths,
+                "refresh_confirmed_tags": True,
                 "classification_run_id": None,
                 "correlation_id": request.correlation_id,
             },
             correlation_id=request.correlation_id,
+            max_attempts=5,
         )
         AuditRepository(self.session).record(
             actor_id="system:openmetadata",
@@ -81,6 +93,11 @@ class IntakeService:
             object_type=request.entity_type,
             object_id=request.entity_fqn,
             correlation_id=request.correlation_id,
-            details={"event_id": request.event_id, "source": request.source},
+            details={
+                "event_id": request.event_id,
+                "source": request.source,
+                "next_job_id": str(job.id),
+                "snapshot_source": "openmetadata-readback",
+            },
         )
         return job

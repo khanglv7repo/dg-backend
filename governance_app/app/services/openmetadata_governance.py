@@ -37,7 +37,9 @@ class OpenMetadataSuggestionService:
             grouped.setdefault(item.get("field_path"), []).append(item)
 
         label_type = (
-            "Generated" if source_kind == ClassificationSource.AGENT.value else "Automated"
+            "Generated"
+            if source_kind == ClassificationSource.AGENT.value
+            else "Automated"
         )
         suggestion_ids: list[str] = []
         for field_path, items in sorted(grouped.items(), key=lambda pair: pair[0] or ""):
@@ -47,9 +49,13 @@ class OpenMetadataSuggestionService:
                 for item in items
             )
             marker_material = f"{classification_run_id}|{field_path or '$entity'}|{tags}"
-            marker = f"[dg-classification:{hashlib.sha256(marker_material.encode()).hexdigest()[:20]}]"
+            marker = (
+                "[dg-classification:"
+                f"{hashlib.sha256(marker_material.encode()).hexdigest()[:20]}]"
+            )
             response = self.client.find_open_tag_suggestion(
-                entity_fqn=entity_fqn, marker=marker
+                entity_fqn=entity_fqn,
+                marker=marker,
             )
             if response is None:
                 response = self.client.create_tag_suggestion(
@@ -90,6 +96,14 @@ class OpenMetadataSuggestionService:
 
 
 class ConfirmedTagApplicationService:
+    """Trusted direct tag application for the AUTO_APPLY branch.
+
+    The direct write is still verified immediately, but Ranger reconciliation is
+    intentionally queued through the same live OpenMetadata read-back path used
+    by human-confirmed Suggestions. That gives manual and auto-apply one common
+    enforcement boundary: current Confirmed OpenMetadata tags.
+    """
+
     def __init__(self, session: Session, client: OpenMetadataClient, *, bot_name: str) -> None:
         self.session = session
         self.client = client
@@ -114,20 +128,22 @@ class ConfirmedTagApplicationService:
             label_type="Automated",
         )
         self.client.assert_confirmed_tags(
-            observed, entity_tags=entity_tags, field_tags=field_tags
+            observed,
+            entity_tags=entity_tags,
+            field_tags=field_tags,
         )
 
-        tags = sorted(set(entity_tags).union(*(set(values) for values in field_tags.values())))
-        tag_field_paths: dict[str, list[str]] = {}
-        for field_path, field_values in field_tags.items():
-            for tag in field_values:
-                tag_field_paths.setdefault(tag, []).append(field_path)
         logical = json.dumps(
             {
+                "entity_type": entity_type,
                 "entity_fqn": entity_fqn,
-                "tags": tags,
-                "field_paths": tag_field_paths,
+                "entity_tags": sorted(set(entity_tags)),
+                "field_tags": {
+                    key: sorted(set(values))
+                    for key, values in sorted(field_tags.items())
+                },
                 "classification_run_id": classification_run_id,
+                "purpose": "refresh-confirmed-tags",
             },
             sort_keys=True,
         )
@@ -136,13 +152,14 @@ class ConfirmedTagApplicationService:
             job_type=JobType.RECONCILE_RANGER,
             idempotency_key=f"reconcile-ranger:{key}",
             payload={
+                "entity_type": entity_type,
                 "entity_fqn": entity_fqn,
-                "tags": tags,
-                "field_paths": tag_field_paths,
+                "refresh_confirmed_tags": True,
                 "classification_run_id": classification_run_id,
                 "correlation_id": correlation_id,
             },
             correlation_id=correlation_id,
+            max_attempts=5,
         )
         self.audit.record(
             actor_id=f"bot:{self.bot_name}",
@@ -156,6 +173,7 @@ class ConfirmedTagApplicationService:
                 "entity_tags": entity_tags,
                 "field_tags": field_tags,
                 "next_job_id": str(job.id),
+                "snapshot_source": "openmetadata-readback",
             },
         )
         return {"reconcile_job_id": str(job.id)}

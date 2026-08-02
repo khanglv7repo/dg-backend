@@ -35,10 +35,16 @@ def _autoclassification_openmetadata_client(settings: Settings) -> OpenMetadataC
 
 
 def handle_classify(session: Session, settings: Settings, payload: dict) -> dict:
-    return ClassificationService(session, settings).classify(MetadataEventRequest.model_validate(payload))
+    return ClassificationService(session, settings).classify(
+        MetadataEventRequest.model_validate(payload)
+    )
 
 
-def handle_create_om_suggestions(session: Session, settings: Settings, payload: dict) -> dict:
+def handle_create_om_suggestions(
+    session: Session,
+    settings: Settings,
+    payload: dict,
+) -> dict:
     return OpenMetadataSuggestionService(
         session,
         _auto_tag_openmetadata_client(settings),
@@ -54,7 +60,11 @@ def handle_create_om_suggestions(session: Session, settings: Settings, payload: 
     )
 
 
-def handle_apply_confirmed_tags(session: Session, settings: Settings, payload: dict) -> dict:
+def handle_apply_confirmed_tags(
+    session: Session,
+    settings: Settings,
+    payload: dict,
+) -> dict:
     return ConfirmedTagApplicationService(
         session,
         _auto_tag_openmetadata_client(settings),
@@ -69,9 +79,52 @@ def handle_apply_confirmed_tags(session: Session, settings: Settings, payload: d
     )
 
 
-def handle_reconcile_ranger(session: Session, settings: Settings, payload: dict) -> dict:
+def handle_reconcile_ranger(
+    session: Session,
+    settings: Settings,
+    payload: dict,
+) -> dict:
     if not settings.ranger_enabled:
         raise ConfigurationError("Ranger integration is disabled")
+
+    entity_type = str(payload.get("entity_type") or "table")
+    entity_fqn = str(payload["entity_fqn"])
+
+    # New jobs use live OpenMetadata read-back. The legacy payload form with
+    # explicit tags/field_paths is retained so already-queued jobs remain valid
+    # during a rolling/local upgrade.
+    refresh_confirmed_tags = bool(
+        payload.get(
+            "refresh_confirmed_tags",
+            "tags" not in payload and "field_paths" not in payload,
+        )
+    )
+
+    if refresh_confirmed_tags:
+        if not settings.openmetadata_enabled:
+            raise ConfigurationError(
+                "OpenMetadata integration must be enabled to refresh confirmed tags"
+            )
+        om_client = _auto_tag_openmetadata_client(settings)
+        try:
+            snapshot = om_client.get_confirmed_tag_snapshot(
+                entity_type=entity_type,
+                entity_fqn=entity_fqn,
+            )
+        finally:
+            om_client.close()
+
+        tags = list(snapshot["tags"])
+        field_paths = dict(snapshot["field_paths"])
+        all_field_paths = list(snapshot["all_field_paths"])
+    else:
+        tags = list(payload.get("tags", []))
+        field_paths = dict(payload.get("field_paths", {}))
+        raw_all_field_paths = payload.get("all_field_paths")
+        all_field_paths = (
+            list(raw_all_field_paths) if raw_all_field_paths is not None else None
+        )
+
     ranger = RangerClient(
         base_url=settings.ranger_base_url,
         username=settings.ranger_service_account,
@@ -85,9 +138,10 @@ def handle_reconcile_ranger(session: Session, settings: Settings, payload: dict)
         timeout=settings.ranger_timeout_seconds,
     )
     return PolicySyncService(session, settings, ranger).sync(
-        entity_fqn=payload["entity_fqn"],
-        tags=list(payload.get("tags", [])),
-        field_paths=dict(payload.get("field_paths", {})),
+        entity_fqn=entity_fqn,
+        tags=tags,
+        field_paths=field_paths,
+        all_field_paths=all_field_paths,
         classification_run_id=payload.get("classification_run_id"),
         correlation_id=payload.get("correlation_id"),
     )
@@ -116,15 +170,31 @@ def handle_verify_trino(session: Session, settings: Settings, payload: dict) -> 
     )
 
 
-def handle_discover_unclassified_assets(session: Session, settings: Settings, payload: dict) -> dict:
-    client = _ingestion_openmetadata_client(settings) if settings.openmetadata_enabled else None
+def handle_discover_unclassified_assets(
+    session: Session,
+    settings: Settings,
+    payload: dict,
+) -> dict:
+    client = (
+        _ingestion_openmetadata_client(settings)
+        if settings.openmetadata_enabled
+        else None
+    )
     return AssetDiscoveryService(session, settings, client).discover(
         correlation_id=payload.get("correlation_id")
     )
 
 
-def handle_sample_column_values(session: Session, settings: Settings, payload: dict) -> dict:
-    om_client = _autoclassification_openmetadata_client(settings) if settings.openmetadata_enabled else None
+def handle_sample_column_values(
+    session: Session,
+    settings: Settings,
+    payload: dict,
+) -> dict:
+    om_client = (
+        _autoclassification_openmetadata_client(settings)
+        if settings.openmetadata_enabled
+        else None
+    )
     return DataValueScannerService(session, settings, om_client=om_client).scan(
         entity_type=payload.get("entity_type", "table"),
         entity_fqn=payload["entity_fqn"],
