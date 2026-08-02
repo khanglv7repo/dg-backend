@@ -1,0 +1,70 @@
+version: 1
+# Resource keys are examples. Replace them with keys from the live Ranger service definition.
+mappings:
+  - tag: PII.Email
+    policy_key: "pii-email:${entity_fqn}:${field_name}"
+    name: "dg-pii-email-${entity_fqn}-${field_name}"
+    description: Allow the governed PII reader group to select the tagged email column.
+    groups: [pii_readers]
+    accesses: [select]
+    resources:
+      table: ["${entity_fqn}"]
+      column: ["${field_name}"]
+    verification_cases:
+      - identity: pii_verifier
+        sql: "SELECT ${field_name} FROM ${entity_fqn} LIMIT 1"
+        expected_allowed: true
+      - identity: unprivileged_verifier
+        sql: "SELECT ${field_name} FROM ${entity_fqn} LIMIT 1"
+        expected_allowed: false
+
+  - tag: PII.Phone
+    policy_key: "pii-phone:${entity_fqn}:${field_name}"
+    name: "dg-pii-phone-${entity_fqn}-${field_name}"
+    description: Allow the governed PII reader group to select the tagged phone column.
+    groups: [pii_readers]
+    accesses: [select]
+    resources:
+      table: ["${entity_fqn}"]
+      column: ["${field_name}"]
+    verification_cases:
+      - identity: pii_verifier
+        sql: "SELECT ${field_name} FROM ${entity_fqn} LIMIT 1"
+        expected_allowed: true
+      - identity: unprivileged_verifier
+        sql: "SELECT ${field_name} FROM ${entity_fqn} LIMIT 1"
+        expected_allowed: false
+
+  - tag: PII.NationalIdentifier
+    policy_key: "pii-national-id:${entity_fqn}:${field_name}"
+    name: "dg-pii-national-id-${entity_fqn}-${field_name}"
+    description: Restrict a government identifier to the governed PII reader group.
+    groups: [pii_readers]
+    accesses: [select]
+    resources:
+      table: ["${entity_fqn}"]
+      column: ["${field_name}"]
+    verification_cases:
+      - identity: pii_verifier
+        sql: "SELECT ${field_name} FROM ${entity_fqn} LIMIT 1"
+        expected_allowed: true
+      - identity: unprivileged_verifier
+        sql: "SELECT ${field_name} FROM ${entity_fqn} LIMIT 1"
+        expected_allowed: false
+
+  - tag: PII.PaymentCard
+    policy_key: "pii-payment-card:${entity_fqn}:${field_name}"
+    name: "dg-pii-payment-card-${entity_fqn}-${field_name}"
+    description: Restrict a payment-card identifier to the governed payment-data group.
+    groups: [payment_data_readers]
+    accesses: [select]
+    resources:
+      table: ["${entity_fqn}"]
+      column: ["${field_name}"]
+    verification_cases:
+      - identity: payment_verifier
+        sql: "SELECT ${field_name} FROM ${entity_fqn} LIMIT 1"
+        expected_allowed: true
+      - identity: unprivileged_verifier
+        sql: "SELECT ${field_name} FROM ${entity_fqn} LIMIT 1"
+        expected_allowed: false

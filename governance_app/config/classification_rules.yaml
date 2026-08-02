@@ -1,0 +1,55 @@
+version: 1
+rules:
+  - id: pii-email-exact
+    target: column
+    when:
+      name_exact: [email, email_address, e_mail]
+    tag: PII.Email
+    confidence: 1.0
+    auto_apply: true
+    rationale: Exact governed column name for an email address.
+
+  - id: pii-email-pattern
+    target: column
+    when:
+      name_regex: "^(customer_|work_|personal_)?e-?mail_address$"
+    tag: PII.Email
+    confidence: 0.94
+    auto_apply: false
+    rationale: Column name strongly resembles an email address.
+
+  - id: pii-phone
+    target: column
+    when:
+      name_regex: "(^|_)(phone|mobile|telephone)(_number)?$"
+    tag: PII.Phone
+    confidence: 0.93
+    auto_apply: false
+    rationale: Column name resembles a telephone number.
+
+  - id: pii-national-id
+    target: column
+    when:
+      name_regex: "(^|_)(national_id|citizen_id|passport_number|ssn)$"
+    tag: PII.NationalIdentifier
+    confidence: 0.96
+    auto_apply: false
+    rationale: Column name resembles a government identifier.
+
+  - id: pii-payment-card
+    target: column
+    when:
+      name_regex: "(^|_)(card_number|pan|payment_card)(_number)?$"
+    tag: PII.PaymentCard
+    confidence: 0.96
+    auto_apply: false
+    rationale: Column name resembles a payment-card identifier.
+
+  - id: confidential-entity-description
+    target: entity
+    when:
+      description_regex: "\\b(confidential|restricted)\\b"
+    tag: Sensitivity.Confidential
+    confidence: 0.90
+    auto_apply: false
+    rationale: Entity description explicitly marks the asset as confidential or restricted.

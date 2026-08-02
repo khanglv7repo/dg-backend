@@ -1,0 +1,31 @@
+version: 1
+
+classifications:
+  - name: PII
+    displayName: Personally Identifiable Information
+    description: Personally identifiable information detected by the Phase 1 governance rules.
+    provider: automation
+    mutuallyExclusive: false
+    tags:
+      - name: Email
+        displayName: Email
+        description: Email address or email-like identifier.
+      - name: Phone
+        displayName: Phone
+        description: Telephone or mobile phone number.
+      - name: NationalIdentifier
+        displayName: National Identifier
+        description: Government or national identity number such as national ID, passport, or SSN-like identifier.
+      - name: PaymentCard
+        displayName: Payment Card
+        description: Payment card or card-number related data.
+
+  - name: Sensitivity
+    displayName: Sensitivity
+    description: Data sensitivity classification used by the Phase 1 governance rules.
+    provider: automation
+    mutuallyExclusive: false
+    tags:
+      - name: Confidential
+        displayName: Confidential
+        description: Confidential or restricted data requiring elevated handling controls.
