@@ -20,10 +20,12 @@ logger = logging.getLogger(__name__)
 class OpenMetadataEventAdapterService:
     """Adapter for raw OpenMetadata ChangeEvent webhooks.
 
-    A ChangeEvent is treated as a trigger, not as the Ranger source of truth.
-    When a tag change is detected we enqueue a RECONCILE_RANGER job that will
-    read the current Confirmed tag state back from OpenMetadata before mapping
-    anything to Ranger.
+    Tag changes and classification are separate lifecycles:
+    - metadata changes may enqueue CLASSIFY_ASSET;
+    - tag lifecycle changes enqueue SYNC_RANGER_TAGS;
+    - the tag-sync worker reads current Confirmed state back from OpenMetadata.
+
+    No Ranger access policy is created here.
     """
 
     def __init__(self, session: Session, settings: Settings) -> None:
@@ -36,11 +38,11 @@ class OpenMetadataEventAdapterService:
         if self.settings.openmetadata_webhook_secret:
             expected = self.settings.openmetadata_webhook_secret.get_secret_value()
             if not token_or_header or token_or_header.strip() != expected.strip():
-                raise AuthorizationError("Invalid OpenMetadata webhook authentication secret")
+                raise AuthorizationError(
+                    "Invalid OpenMetadata webhook authentication secret"
+                )
 
     def process_change_event(self, event_data: dict[str, Any]) -> list[str]:
-        """Process one raw OpenMetadata ChangeEvent dictionary."""
-
         event_id = str(event_data.get("id") or event_data.get("eventId") or "")
         event_type = str(event_data.get("eventType") or "")
         event_type_upper = event_type.upper()
@@ -55,16 +57,15 @@ class OpenMetadataEventAdapterService:
         correlation_id = f"om-event-{event_id}" if event_id else None
 
         if not entity_fqn:
-            logger.info("Ignoring OpenMetadata event with missing entityFullyQualifiedName")
+            logger.info(
+                "Ignoring OpenMetadata event with missing entityFullyQualifiedName"
+            )
             return []
 
         created_jobs: list[str] = []
         change_desc = event_data.get("changeDescription") or {}
         tag_changed = self._has_tag_change(change_desc)
 
-        # Tag changes are a separate lifecycle from classification. The webhook
-        # does not decide which tags are Confirmed; the execution worker reads
-        # the live OpenMetadata entity and then reconciles Ranger from that state.
         if tag_changed:
             logical = json.dumps(
                 {
@@ -72,18 +73,17 @@ class OpenMetadataEventAdapterService:
                     "event_type": event_type_upper,
                     "entity_type": entity_type,
                     "entity_fqn": entity_fqn,
-                    "purpose": "refresh-confirmed-tags",
+                    "purpose": "sync-ranger-tag-assignments",
                 },
                 sort_keys=True,
             )
             fingerprint = hashlib.sha256(logical.encode()).hexdigest()
             job = self.jobs.enqueue(
-                job_type=JobType.RECONCILE_RANGER,
-                idempotency_key=f"confirmed-tags-refresh:{fingerprint}",
+                job_type=JobType.SYNC_RANGER_TAGS,
+                idempotency_key=f"sync-ranger-tags:{fingerprint}",
                 payload={
                     "entity_type": entity_type,
                     "entity_fqn": entity_fqn,
-                    "refresh_confirmed_tags": True,
                     "classification_run_id": None,
                     "correlation_id": correlation_id,
                 },
@@ -93,7 +93,7 @@ class OpenMetadataEventAdapterService:
             self.audit.record(
                 actor_id="system:openmetadata-webhook",
                 actor_name="OpenMetadata Webhook Adapter",
-                action="CONFIRMED_TAG_REFRESH_ENQUEUED",
+                action="RANGER_TAG_SYNC_ENQUEUED",
                 object_type=entity_type,
                 object_id=entity_fqn,
                 correlation_id=correlation_id,
@@ -106,9 +106,7 @@ class OpenMetadataEventAdapterService:
             )
             created_jobs.append(str(job.id))
 
-        # Do not re-run classification for a pure tag lifecycle event. Accepting
-        # a native Suggestion changes tags and must not create the same Suggestion
-        # again. Metadata creation and non-tag metadata updates still classify.
+        # Accepting/rejecting a native Suggestion must not reclassify the asset.
         should_classify = event_type_upper == "ENTITY_CREATED" or (
             event_type_upper in {"ENTITY_UPDATED", "ENTITY_FIELDS_CHANGED"}
             and not tag_changed
@@ -138,9 +136,13 @@ class OpenMetadataEventAdapterService:
             )
 
             logical_classify = (
-                f"{normalized.event_id}|{normalized.entity_type}|{normalized.entity_fqn}"
+                f"{normalized.event_id}|"
+                f"{normalized.entity_type}|"
+                f"{normalized.entity_fqn}"
             )
-            fingerprint_classify = hashlib.sha256(logical_classify.encode()).hexdigest()
+            fingerprint_classify = hashlib.sha256(
+                logical_classify.encode()
+            ).hexdigest()
             job = self.jobs.enqueue(
                 job_type=JobType.CLASSIFY_ASSET,
                 idempotency_key=f"classify-webhook:{fingerprint_classify}",
@@ -167,13 +169,6 @@ class OpenMetadataEventAdapterService:
 
     @classmethod
     def _has_tag_change(cls, change_desc: dict[str, Any]) -> bool:
-        """Return True when ChangeDescription contains a tag lifecycle signal.
-
-        OpenMetadata can represent column tag changes at different nesting
-        levels. We therefore inspect field names and old/new payloads instead of
-        requiring an exact ``name == 'tags'`` shape.
-        """
-
         for bucket in ("fieldsAdded", "fieldsUpdated", "fieldsDeleted"):
             changes = change_desc.get(bucket, []) or []
             for change in changes:
@@ -205,7 +200,11 @@ class OpenMetadataEventAdapterService:
 
         if isinstance(value, str):
             lowered = value.lower()
-            return "tagfqn" in lowered or '"tags"' in lowered or "taglabels" in lowered
+            return (
+                "tagfqn" in lowered
+                or '"tags"' in lowered
+                or "taglabels" in lowered
+            )
 
         return False
 

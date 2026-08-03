@@ -36,10 +36,16 @@ def normalize_policy(document: dict | None) -> dict | None:
     description = normalized.get("description")
     if isinstance(description, str) and " | managed-by=dg-backend;" in description:
         normalized["description"] = description.split(" | managed-by=dg-backend;", 1)[0]
-    for item_key in ("policyItems", "denyPolicyItems", "allowExceptions", "denyExceptions"):
+    for item_key in (
+        "policyItems",
+        "denyPolicyItems",
+        "allowExceptions",
+        "denyExceptions",
+    ):
         if item_key in normalized:
             normalized[item_key] = sorted(
-                normalized[item_key], key=lambda item: json.dumps(item, sort_keys=True)
+                normalized[item_key],
+                key=lambda item: json.dumps(item, sort_keys=True),
             )
     return normalized
 
@@ -57,16 +63,42 @@ class RangerClient:
     ) -> None:
         auth = (username, password or "") if username else None
         self.client = httpx.Client(
-            base_url=base_url.rstrip("/"), auth=auth, timeout=timeout, headers={"Accept": "application/json"}
+            base_url=base_url.rstrip("/"),
+            auth=auth,
+            timeout=timeout,
+            headers={"Accept": "application/json"},
         )
         self.service_name = service_name
         self.dry_run = dry_run
 
+    def close(self) -> None:
+        self.client.close()
+
     def health(self) -> dict:
-        return self._request("GET", f"/service/name/{quote(self.service_name, safe='')}")
+        return self._request(
+            "GET",
+            f"/service/name/{quote(self.service_name, safe='')}",
+        )
+
+    def list_policies(self) -> list[dict]:
+        response = self._request(
+            "GET",
+            f"/service/{quote(self.service_name, safe='')}/policy",
+        )
+        if isinstance(response, list):
+            return [item for item in response if isinstance(item, dict)]
+        if isinstance(response, dict):
+            for key in ("policies", "list", "data"):
+                values = response.get(key)
+                if isinstance(values, list):
+                    return [item for item in values if isinstance(item, dict)]
+        return []
 
     def find_by_name(self, name: str) -> dict | None:
-        path = f"/service/{quote(self.service_name, safe='')}/policy/{quote(name, safe='')}"
+        path = (
+            f"/service/{quote(self.service_name, safe='')}/policy/"
+            f"{quote(name, safe='')}"
+        )
         try:
             return self._request("GET", path)
         except ExternalSystemError as exc:
@@ -119,8 +151,13 @@ class RangerClient:
                 "policy_id": str(existing.get("id")),
                 "document": existing,
             }
+
         policy_id = existing.get("id")
-        updated = self._request("PUT", f"/policy/{policy_id}", json={**document, "id": policy_id})
+        updated = self._request(
+            "PUT",
+            f"/policy/{policy_id}",
+            json={**document, "id": policy_id},
+        )
         return {
             "action": ReconciliationAction.UPDATE.value,
             "desired_hash": desired_hash,
@@ -172,7 +209,11 @@ class RangerClient:
             "document": {},
         }
 
-    def reconcile_removal(self, policy_name: str, allow_delete: bool = False) -> dict[str, Any] | None:
+    def reconcile_removal(
+        self,
+        policy_name: str,
+        allow_delete: bool = False,
+    ) -> dict[str, Any] | None:
         existing = self.find_by_name(policy_name)
         if not existing:
             return None
@@ -187,14 +228,21 @@ class RangerClient:
             return self.delete_policy(existing)
         return self.disable_policy(existing)
 
-
-    def _request(self, method: str, path: str, **kwargs) -> dict:
+    def _request(self, method: str, path: str, **kwargs) -> Any:
         try:
             response = self.client.request(method, path, **kwargs)
         except httpx.TimeoutException as exc:
-            raise ExternalSystemError("Ranger request timed out", system="ranger", retryable=True) from exc
+            raise ExternalSystemError(
+                "Ranger request timed out",
+                system="ranger",
+                retryable=True,
+            ) from exc
         except httpx.HTTPError as exc:
-            raise ExternalSystemError("Ranger connection failed", system="ranger", retryable=True) from exc
+            raise ExternalSystemError(
+                "Ranger connection failed",
+                system="ranger",
+                retryable=True,
+            ) from exc
         if response.is_error:
             retryable = response.status_code == 429 or response.status_code >= 500
             raise ExternalSystemError(

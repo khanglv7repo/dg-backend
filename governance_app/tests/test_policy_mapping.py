@@ -1,73 +1,66 @@
 from pathlib import Path
 
-from app.clients.ranger import canonical_hash, normalize_policy
+import pytest
+
+from app.core.errors import ConfigurationError
 from app.rules.policy_mapping import PolicyMappingResolver
 
 
-def test_policy_mapping_renders_entity_and_column_placeholders() -> None:
+def test_policy_catalog_renders_static_ranger_tag_policy() -> None:
     resolver = PolicyMappingResolver.from_path(Path("config/policies.yaml"))
 
-    policies = resolver.resolve_all(
-        tags=["PII.Email", "Sensitivity.Confidential"],
-        entity_fqn="hive.sales.customers",
-        field_paths={"PII.Email": ["columns.email"]},
-        service="trino",
-    )
+    policies = resolver.resolve_all(service="dev_tag", tags=["PII.Email"])
 
     assert len(policies) == 1
     policy = policies[0]
-    assert policy.resources["column"] == ["email"]
-    assert policy.resources["table"] == ["hive.sales.customers"]
-    assert policy.verification_cases[0].sql == "SELECT email FROM hive.sales.customers LIMIT 1"
+    assert policy.name == "dg-tag-pii-email"
+    assert policy.service == "dev_tag"
+    assert policy.resources == {"tag": ["PII.Email"]}
+    assert policy.groups == ["pii_readers"]
+    assert policy.accesses == ["trino:select"]
 
 
-def test_policy_mapping_creates_one_policy_per_tagged_column() -> None:
+def test_policy_catalog_does_not_need_asset_or_field() -> None:
     resolver = PolicyMappingResolver.from_path(Path("config/policies.yaml"))
 
-    policies = resolver.resolve_all(
-        tags=["PII.Email"],
-        entity_fqn="hive.sales.customers",
-        field_paths={"PII.Email": ["columns.work_email", "columns.personal_email"]},
-        service="trino",
-    )
+    policies = resolver.resolve_all(service="dev_tag")
 
-    assert [policy.resources["column"][0] for policy in policies] == [
-        "personal_email",
-        "work_email",
-    ]
-    assert len({policy.policy_key for policy in policies}) == 2
-
-
-def test_ranger_normalization_strips_backend_marker() -> None:
-    desired = {
-        "service": "trino",
-        "name": "policy",
-        "description": "Base description",
-        "isEnabled": True,
-        "resources": {},
-        "policyItems": [],
+    assert {policy.resources["tag"][0] for policy in policies} == {
+        "PII.Email",
+        "PII.Phone",
+        "PII.NationalIdentifier",
+        "PII.PaymentCard",
     }
-    live = {
-        **desired,
-        "description": (
-            "Base description | managed-by=dg-backend;policy-key=k;desired-sha256=abc"
-        ),
-        "id": 42,
-    }
-    assert normalize_policy(desired) == normalize_policy(live)
-    assert canonical_hash(normalize_policy(desired) or {}) == canonical_hash(
-        normalize_policy(live) or {}
-    )
+    assert all("${entity_fqn}" not in policy.name for policy in policies)
+    assert all("${field_name}" not in policy.name for policy in policies)
 
 
-def test_policy_mapping_allows_classification_tags_without_enforcement_mapping() -> None:
-    resolver = PolicyMappingResolver.from_path(Path("config/policies.yaml"))
+def test_policy_catalog_rejects_old_per_asset_placeholders() -> None:
+    with pytest.raises(ConfigurationError, match="per-asset Ranger policy placeholders"):
+        PolicyMappingResolver(
+            {
+                "tag_policies": [
+                    {
+                        "tag": "PII.Email",
+                        "name": "dg-${entity_fqn}-${field_name}",
+                        "groups": ["pii_readers"],
+                    }
+                ]
+            }
+        )
 
-    policies = resolver.resolve_all(
-        tags=["Sensitivity.Confidential"],
-        entity_fqn="hive.sales.customers",
-        field_paths={},
-        service="trino",
-    )
 
-    assert policies == []
+def test_policy_catalog_rejects_unqualified_tag_access_type() -> None:
+    with pytest.raises(ConfigurationError, match="namespaced access types"):
+        PolicyMappingResolver(
+            {
+                "tag_policies": [
+                    {
+                        "tag": "PII.Email",
+                        "name": "dg-tag-pii-email",
+                        "groups": ["pii_readers"],
+                        "accesses": ["select"],
+                    }
+                ]
+            }
+        )

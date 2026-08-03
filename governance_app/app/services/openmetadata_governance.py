@@ -14,7 +14,13 @@ from app.repositories.jobs import JobRepository
 
 
 class OpenMetadataSuggestionService:
-    def __init__(self, session: Session, client: OpenMetadataClient, *, bot_name: str) -> None:
+    def __init__(
+        self,
+        session: Session,
+        client: OpenMetadataClient,
+        *,
+        bot_name: str,
+    ) -> None:
         self.session = session
         self.client = client
         self.bot_name = bot_name
@@ -42,13 +48,19 @@ class OpenMetadataSuggestionService:
             else "Automated"
         )
         suggestion_ids: list[str] = []
-        for field_path, items in sorted(grouped.items(), key=lambda pair: pair[0] or ""):
+        for field_path, items in sorted(
+            grouped.items(),
+            key=lambda pair: pair[0] or "",
+        ):
             tags = sorted({str(item["tag"]) for item in items})
             evidence = "; ".join(
-                f"{item.get('tag')}: {item.get('rationale', 'classification evidence')}"
+                f"{item.get('tag')}: "
+                f"{item.get('rationale', 'classification evidence')}"
                 for item in items
             )
-            marker_material = f"{classification_run_id}|{field_path or '$entity'}|{tags}"
+            marker_material = (
+                f"{classification_run_id}|{field_path or '$entity'}|{tags}"
+            )
             marker = (
                 "[dg-classification:"
                 f"{hashlib.sha256(marker_material.encode()).hexdigest()[:20]}]"
@@ -78,7 +90,10 @@ class OpenMetadataSuggestionService:
                 )
             suggestion_ids.append(str(suggestion_id))
 
-        self.runs.set_openmetadata_suggestions(classification_run_id, suggestion_ids)
+        self.runs.set_openmetadata_suggestions(
+            classification_run_id,
+            suggestion_ids,
+        )
         self.audit.record(
             actor_id=f"bot:{self.bot_name}",
             actor_name=self.bot_name,
@@ -92,19 +107,26 @@ class OpenMetadataSuggestionService:
                 "source_kind": source_kind,
             },
         )
-        return {"suggestion_ids": suggestion_ids, "count": len(suggestion_ids)}
+        return {
+            "suggestion_ids": suggestion_ids,
+            "count": len(suggestion_ids),
+        }
 
 
 class ConfirmedTagApplicationService:
-    """Trusted direct tag application for the AUTO_APPLY branch.
+    """Trusted direct OM tag application for the AUTO_APPLY branch.
 
-    The direct write is still verified immediately, but Ranger reconciliation is
-    intentionally queued through the same live OpenMetadata read-back path used
-    by human-confirmed Suggestions. That gives manual and auto-apply one common
-    enforcement boundary: current Confirmed OpenMetadata tags.
+    AUTO_APPLY and human confirmation converge on the same Flow-B boundary:
+    current Confirmed OpenMetadata state -> Ranger tag assignments.
     """
 
-    def __init__(self, session: Session, client: OpenMetadataClient, *, bot_name: str) -> None:
+    def __init__(
+        self,
+        session: Session,
+        client: OpenMetadataClient,
+        *,
+        bot_name: str,
+    ) -> None:
         self.session = session
         self.client = client
         self.bot_name = bot_name
@@ -143,18 +165,17 @@ class ConfirmedTagApplicationService:
                     for key, values in sorted(field_tags.items())
                 },
                 "classification_run_id": classification_run_id,
-                "purpose": "refresh-confirmed-tags",
+                "purpose": "sync-ranger-tag-assignments",
             },
             sort_keys=True,
         )
         key = hashlib.sha256(logical.encode()).hexdigest()
         job = JobRepository(self.session).enqueue(
-            job_type=JobType.RECONCILE_RANGER,
-            idempotency_key=f"reconcile-ranger:{key}",
+            job_type=JobType.SYNC_RANGER_TAGS,
+            idempotency_key=f"sync-ranger-tags:{key}",
             payload={
                 "entity_type": entity_type,
                 "entity_fqn": entity_fqn,
-                "refresh_confirmed_tags": True,
                 "classification_run_id": classification_run_id,
                 "correlation_id": correlation_id,
             },
@@ -176,4 +197,8 @@ class ConfirmedTagApplicationService:
                 "snapshot_source": "openmetadata-readback",
             },
         )
-        return {"reconcile_job_id": str(job.id)}
+        return {
+            "tag_sync_job_id": str(job.id),
+            # Compatibility key for callers written against the previous patch.
+            "reconcile_job_id": str(job.id),
+        }

@@ -10,7 +10,6 @@ from app.models.enums import JobType
 from app.repositories.audit import AuditRepository
 from app.repositories.jobs import JobRepository
 from app.rules.classification import ClassificationRuleEngine
-from app.rules.policy_mapping import PolicyMappingResolver
 from app.schemas.events import ConfirmedTagEventRequest, MetadataEventRequest
 
 
@@ -50,36 +49,29 @@ class IntakeService:
         return job
 
     def accept_confirmed_tag_event(self, request: ConfirmedTagEventRequest):
-        """Enqueue Ranger reconciliation from live OpenMetadata state.
+        """Compatibility intake for a normalized Confirmed-tag trigger.
 
-        ``tags`` and ``field_paths`` remain in the request model for backwards
-        compatibility, but enforcement does not trust caller-provided tag state.
-        The worker reads the current Confirmed tags from OpenMetadata before
-        resolving ``config/policies.yaml``.
+        Caller-supplied tags are not trusted. The worker reads live OpenMetadata
+        state and syncs only tag assignments into Ranger's tag store.
         """
 
-        resolver = PolicyMappingResolver.from_path(
-            self.settings.resolve_path(self.settings.policy_mappings_path)
-        )
         logical = json.dumps(
             {
                 "event_id": request.event_id,
                 "entity_type": request.entity_type,
                 "entity_fqn": request.entity_fqn,
                 "source": request.source,
-                "policy_version": resolver.configuration_version,
-                "purpose": "refresh-confirmed-tags",
+                "purpose": "sync-ranger-tag-assignments",
             },
             sort_keys=True,
         )
         fingerprint = hashlib.sha256(logical.encode()).hexdigest()
         job = JobRepository(self.session).enqueue(
-            job_type=JobType.RECONCILE_RANGER,
+            job_type=JobType.SYNC_RANGER_TAGS,
             idempotency_key=f"confirmed-tags:{fingerprint}",
             payload={
                 "entity_type": request.entity_type,
                 "entity_fqn": request.entity_fqn,
-                "refresh_confirmed_tags": True,
                 "classification_run_id": None,
                 "correlation_id": request.correlation_id,
             },

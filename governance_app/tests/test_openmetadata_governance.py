@@ -94,57 +94,13 @@ def test_suggestion_service_groups_by_openmetadata_entity_link_target(session) -
     session.refresh(run)
     assert result["count"] == 2
     assert run.openmetadata_suggestion_ids == ["suggestion-1", "suggestion-2"]
-    assert {call["field_path"] for call in fake.calls} == {None, "columns.email"}
+    assert {call["field_path"] for call in fake.calls} == {
+        None,
+        "columns.email",
+    }
 
 
-class ExistingSuggestionOpenMetadata(FakeOpenMetadata):
-    def find_open_tag_suggestion(self, **kwargs):
-        return {"id": "existing-suggestion", "description": kwargs["marker"]}
-
-
-def test_suggestion_service_reuses_open_suggestion_on_retry(session) -> None:
-    with session.begin():
-        run = ClassificationRunRepository(session).create(
-            event_id="evt-retry",
-            entity_type="table",
-            entity_fqn="hive.sales.customers",
-            source_kind=ClassificationSource.DETERMINISTIC.value,
-            source_version="rules-v1",
-            outcome="EXACT",
-            action=ClassificationAction.OPENMETADATA_SUGGESTION.value,
-            suggestions=[],
-            evidence={},
-            confidence=0.94,
-            correlation_id="corr",
-        )
-
-    fake = ExistingSuggestionOpenMetadata()
-    with session.begin():
-        result = OpenMetadataSuggestionService(
-            session,
-            fake,
-            bot_name="governance-execution-bot",
-        ).create(
-            classification_run_id=str(run.id),
-            entity_type="table",
-            entity_fqn="hive.sales.customers",
-            source_kind=ClassificationSource.DETERMINISTIC.value,
-            source_version="rules-v1",
-            suggestions=[
-                {
-                    "tag": "PII.Email",
-                    "field_path": "columns.email",
-                    "rationale": "rule",
-                }
-            ],
-            correlation_id="corr",
-        )
-
-    assert result["suggestion_ids"] == ["existing-suggestion"]
-    assert fake.calls == []
-
-
-def test_trusted_auto_apply_reconciles_through_live_openmetadata_readback(session) -> None:
+def test_trusted_auto_apply_enqueues_ranger_tag_sync(session) -> None:
     fake = FakeConfirmedOpenMetadata()
 
     with session.begin():
@@ -166,12 +122,11 @@ def test_trusted_auto_apply_reconciles_through_live_openmetadata_readback(sessio
     assert fake.applied is not None
     assert fake.asserted is not None
     assert job is not None
-    assert job.job_type == JobType.RECONCILE_RANGER.value
+    assert job.job_type == JobType.SYNC_RANGER_TAGS.value
     assert job.payload == {
         "entity_type": "table",
         "entity_fqn": "hive.sales.customers",
-        "refresh_confirmed_tags": True,
         "classification_run_id": "run-1",
         "correlation_id": "corr",
     }
-    assert result["reconcile_job_id"] == str(job.id)
+    assert result["tag_sync_job_id"] == str(job.id)

@@ -1,70 +1,46 @@
-version: 1
-# Resource keys are examples. Replace them with keys from the live Ranger service definition.
-mappings:
+version: 2
+
+# Static Ranger tag-policy catalog.
+#
+# Ranger's tag service uses namespaced access types from component service-defs.
+# For the local dev_trino service the Trino "select" permission is "trino:select",
+# not plain "select".
+#
+# FLOW A:
+#   edit this file -> restart backend -> policies reconcile into RANGER_TAG_SERVICE_NAME.
+#
+# FLOW B is independent:
+#   OpenMetadata Confirmed tags -> Ranger tag store assignments.
+#
+# IMPORTANT:
+#   Do not put ${entity_fqn}, ${field_path}, or ${field_name} here.
+#   These policies exist before any asset is classified.
+
+tag_policies:
   - tag: PII.Email
-    policy_key: "pii-email:${entity_fqn}:${field_name}"
-    name: "dg-pii-email-${entity_fqn}-${field_name}"
-    description: Allow the governed PII reader group to select the tagged email column.
+    policy_key: "tag-policy:PII.Email"
+    name: "dg-tag-pii-email"
+    description: Allow governed PII readers to select resources tagged PII.Email.
     groups: [pii_readers]
-    accesses: [select]
-    resources:
-      table: ["${entity_fqn}"]
-      column: ["${field_name}"]
-    verification_cases:
-      - identity: pii_verifier
-        sql: "SELECT ${field_name} FROM ${entity_fqn} LIMIT 1"
-        expected_allowed: true
-      - identity: unprivileged_verifier
-        sql: "SELECT ${field_name} FROM ${entity_fqn} LIMIT 1"
-        expected_allowed: false
+    accesses: [trino:select]
 
   - tag: PII.Phone
-    policy_key: "pii-phone:${entity_fqn}:${field_name}"
-    name: "dg-pii-phone-${entity_fqn}-${field_name}"
-    description: Allow the governed PII reader group to select the tagged phone column.
+    policy_key: "tag-policy:PII.Phone"
+    name: "dg-tag-pii-phone"
+    description: Allow governed PII readers to select resources tagged PII.Phone.
     groups: [pii_readers]
-    accesses: [select]
-    resources:
-      table: ["${entity_fqn}"]
-      column: ["${field_name}"]
-    verification_cases:
-      - identity: pii_verifier
-        sql: "SELECT ${field_name} FROM ${entity_fqn} LIMIT 1"
-        expected_allowed: true
-      - identity: unprivileged_verifier
-        sql: "SELECT ${field_name} FROM ${entity_fqn} LIMIT 1"
-        expected_allowed: false
+    accesses: [trino:select]
 
   - tag: PII.NationalIdentifier
-    policy_key: "pii-national-id:${entity_fqn}:${field_name}"
-    name: "dg-pii-national-id-${entity_fqn}-${field_name}"
-    description: Restrict a government identifier to the governed PII reader group.
+    policy_key: "tag-policy:PII.NationalIdentifier"
+    name: "dg-tag-pii-national-identifier"
+    description: Allow governed PII readers to select resources tagged PII.NationalIdentifier.
     groups: [pii_readers]
-    accesses: [select]
-    resources:
-      table: ["${entity_fqn}"]
-      column: ["${field_name}"]
-    verification_cases:
-      - identity: pii_verifier
-        sql: "SELECT ${field_name} FROM ${entity_fqn} LIMIT 1"
-        expected_allowed: true
-      - identity: unprivileged_verifier
-        sql: "SELECT ${field_name} FROM ${entity_fqn} LIMIT 1"
-        expected_allowed: false
+    accesses: [trino:select]
 
   - tag: PII.PaymentCard
-    policy_key: "pii-payment-card:${entity_fqn}:${field_name}"
-    name: "dg-pii-payment-card-${entity_fqn}-${field_name}"
-    description: Restrict a payment-card identifier to the governed payment-data group.
+    policy_key: "tag-policy:PII.PaymentCard"
+    name: "dg-tag-pii-payment-card"
+    description: Allow governed payment-data readers to select resources tagged PII.PaymentCard.
     groups: [payment_data_readers]
-    accesses: [select]
-    resources:
-      table: ["${entity_fqn}"]
-      column: ["${field_name}"]
-    verification_cases:
-      - identity: payment_verifier
-        sql: "SELECT ${field_name} FROM ${entity_fqn} LIMIT 1"
-        expected_allowed: true
-      - identity: unprivileged_verifier
-        sql: "SELECT ${field_name} FROM ${entity_fqn} LIMIT 1"
-        expected_allowed: false
+    accesses: [trino:select]

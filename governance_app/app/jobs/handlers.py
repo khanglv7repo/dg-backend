@@ -3,7 +3,7 @@ from __future__ import annotations
 from sqlalchemy.orm import Session
 
 from app.clients.openmetadata import OpenMetadataClient
-from app.clients.ranger import RangerClient
+from app.clients.ranger_tags import RangerTagStoreClient
 from app.clients.trino import TrinoDBAPIExecutor
 from app.core.config import Settings
 from app.core.errors import ConfigurationError
@@ -16,11 +16,13 @@ from app.services.openmetadata_governance import (
     ConfirmedTagApplicationService,
     OpenMetadataSuggestionService,
 )
-from app.services.policy_sync import PolicySyncService
+from app.services.policy_sync import RangerTagAssignmentService
 from app.services.verification import VerificationService
 
 
-def _autoclassification_openmetadata_client(settings: Settings) -> OpenMetadataClient:
+def _autoclassification_openmetadata_client(
+    settings: Settings,
+) -> OpenMetadataClient:
     if not settings.openmetadata_enabled:
         raise ConfigurationError("OpenMetadata integration is disabled")
     return OpenMetadataClient(
@@ -34,7 +36,11 @@ def _autoclassification_openmetadata_client(settings: Settings) -> OpenMetadataC
     )
 
 
-def handle_classify(session: Session, settings: Settings, payload: dict) -> dict:
+def handle_classify(
+    session: Session,
+    settings: Settings,
+    payload: dict,
+) -> dict:
     return ClassificationService(session, settings).classify(
         MetadataEventRequest.model_validate(payload)
     )
@@ -79,75 +85,62 @@ def handle_apply_confirmed_tags(
     )
 
 
-def handle_reconcile_ranger(
+def handle_sync_ranger_tags(
     session: Session,
     settings: Settings,
     payload: dict,
 ) -> dict:
     if not settings.ranger_enabled:
         raise ConfigurationError("Ranger integration is disabled")
+    if not settings.openmetadata_enabled:
+        raise ConfigurationError(
+            "OpenMetadata integration must be enabled to sync Ranger tags"
+        )
 
     entity_type = str(payload.get("entity_type") or "table")
     entity_fqn = str(payload["entity_fqn"])
 
-    # New jobs use live OpenMetadata read-back. The legacy payload form with
-    # explicit tags/field_paths is retained so already-queued jobs remain valid
-    # during a rolling/local upgrade.
-    refresh_confirmed_tags = bool(
-        payload.get(
-            "refresh_confirmed_tags",
-            "tags" not in payload and "field_paths" not in payload,
+    om_client = _auto_tag_openmetadata_client(settings)
+    try:
+        snapshot = om_client.get_confirmed_tag_snapshot(
+            entity_type=entity_type,
+            entity_fqn=entity_fqn,
         )
-    )
+    finally:
+        om_client.close()
 
-    if refresh_confirmed_tags:
-        if not settings.openmetadata_enabled:
-            raise ConfigurationError(
-                "OpenMetadata integration must be enabled to refresh confirmed tags"
-            )
-        om_client = _auto_tag_openmetadata_client(settings)
-        try:
-            snapshot = om_client.get_confirmed_tag_snapshot(
-                entity_type=entity_type,
-                entity_fqn=entity_fqn,
-            )
-        finally:
-            om_client.close()
-
-        tags = list(snapshot["tags"])
-        field_paths = dict(snapshot["field_paths"])
-        all_field_paths = list(snapshot["all_field_paths"])
-    else:
-        tags = list(payload.get("tags", []))
-        field_paths = dict(payload.get("field_paths", {}))
-        raw_all_field_paths = payload.get("all_field_paths")
-        all_field_paths = (
-            list(raw_all_field_paths) if raw_all_field_paths is not None else None
+    tag_store = _ranger_tag_store_client(settings)
+    try:
+        return RangerTagAssignmentService(
+            session,
+            settings,
+            tag_store,
+        ).sync(
+            entity_type=entity_type,
+            entity_fqn=entity_fqn,
+            entity_tags=list(snapshot["entity_tags"]),
+            field_tags=dict(snapshot["field_tags"]),
+            classification_run_id=payload.get("classification_run_id"),
+            correlation_id=payload.get("correlation_id"),
         )
-
-    ranger = RangerClient(
-        base_url=settings.ranger_base_url,
-        username=settings.ranger_service_account,
-        password=(
-            settings.ranger_service_secret.get_secret_value()
-            if settings.ranger_service_secret
-            else None
-        ),
-        service_name=settings.ranger_service_name,
-        dry_run=settings.ranger_dry_run,
-        timeout=settings.ranger_timeout_seconds,
-    )
-    return PolicySyncService(session, settings, ranger).sync(
-        entity_fqn=entity_fqn,
-        tags=tags,
-        field_paths=field_paths,
-        all_field_paths=all_field_paths,
-        classification_run_id=payload.get("classification_run_id"),
-        correlation_id=payload.get("correlation_id"),
-    )
+    finally:
+        tag_store.close()
 
 
-def handle_verify_trino(session: Session, settings: Settings, payload: dict) -> dict:
+def handle_reconcile_ranger(
+    session: Session,
+    settings: Settings,
+    payload: dict,
+) -> dict:
+    """Compatibility handler for already-queued v0.4 RECONCILE_RANGER jobs."""
+    return handle_sync_ranger_tags(session, settings, payload)
+
+
+def handle_verify_trino(
+    session: Session,
+    settings: Settings,
+    payload: dict,
+) -> dict:
     if not settings.trino_enabled:
         raise ConfigurationError("Trino integration is disabled")
     executor = TrinoDBAPIExecutor(
@@ -195,7 +188,11 @@ def handle_sample_column_values(
         if settings.openmetadata_enabled
         else None
     )
-    return DataValueScannerService(session, settings, om_client=om_client).scan(
+    return DataValueScannerService(
+        session,
+        settings,
+        om_client=om_client,
+    ).scan(
         entity_type=payload.get("entity_type", "table"),
         entity_fqn=payload["entity_fqn"],
         fields=list(payload.get("fields", [])),
@@ -203,7 +200,9 @@ def handle_sample_column_values(
     )
 
 
-def _ingestion_openmetadata_client(settings: Settings) -> OpenMetadataClient:
+def _ingestion_openmetadata_client(
+    settings: Settings,
+) -> OpenMetadataClient:
     if not settings.openmetadata_enabled:
         raise ConfigurationError("OpenMetadata integration is disabled")
     return OpenMetadataClient(
@@ -217,7 +216,9 @@ def _ingestion_openmetadata_client(settings: Settings) -> OpenMetadataClient:
     )
 
 
-def _auto_tag_openmetadata_client(settings: Settings) -> OpenMetadataClient:
+def _auto_tag_openmetadata_client(
+    settings: Settings,
+) -> OpenMetadataClient:
     if not settings.openmetadata_enabled:
         raise ConfigurationError("OpenMetadata integration is disabled")
     return OpenMetadataClient(
@@ -231,10 +232,28 @@ def _auto_tag_openmetadata_client(settings: Settings) -> OpenMetadataClient:
     )
 
 
+def _ranger_tag_store_client(
+    settings: Settings,
+) -> RangerTagStoreClient:
+    return RangerTagStoreClient(
+        base_url=settings.ranger_tag_store_base_url,
+        username=settings.ranger_service_account,
+        password=(
+            settings.ranger_service_secret.get_secret_value()
+            if settings.ranger_service_secret
+            else None
+        ),
+        resource_service_name=settings.ranger_service_name,
+        dry_run=settings.ranger_dry_run,
+        timeout=settings.ranger_timeout_seconds,
+    )
+
+
 HANDLERS = {
     JobType.CLASSIFY_ASSET: handle_classify,
     JobType.CREATE_OM_SUGGESTIONS: handle_create_om_suggestions,
     JobType.APPLY_CONFIRMED_TAGS: handle_apply_confirmed_tags,
+    JobType.SYNC_RANGER_TAGS: handle_sync_ranger_tags,
     JobType.RECONCILE_RANGER: handle_reconcile_ranger,
     JobType.VERIFY_TRINO: handle_verify_trino,
     JobType.DISCOVER_UNCLASSIFIED_ASSETS: handle_discover_unclassified_assets,

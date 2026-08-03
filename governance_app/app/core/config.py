@@ -35,7 +35,8 @@ class Settings(BaseSettings):
     openmetadata_execution_bot_token: SecretStr | None = Field(
         default=None,
         validation_alias=AliasChoices(
-            "OM_AUTOCLASSIFICATION_BOT_TOKEN", "OPENMETADATA_EXECUTION_BOT_TOKEN"
+            "OM_AUTOCLASSIFICATION_BOT_TOKEN",
+            "OPENMETADATA_EXECUTION_BOT_TOKEN",
         ),
     )
     openmetadata_auto_tag_bot_token: SecretStr | None = Field(
@@ -65,12 +66,27 @@ class Settings(BaseSettings):
     llm_model: str = "gpt-5-mini"
     llm_api_key: SecretStr | None = None
 
-    # Ranger machine/service identity, available only to the execution worker.
+    # Ranger machine/service identity.
     ranger_enabled: bool = False
     ranger_base_url: str = "http://localhost:6080/service/public/v2/api"
+    ranger_tag_store_base_url: str = "http://localhost:6080/service/tags"
     ranger_service_account: str | None = None
     ranger_service_secret: SecretStr | None = None
-    ranger_service_name: str = "trino"
+
+    # Resource service receiving RangerServiceResource entries used by the Trino plugin.
+    # RANGER_SERVICE_NAME remains supported so the existing local .env does not break.
+    ranger_service_name: str = Field(
+        default="trino",
+        validation_alias=AliasChoices(
+            "RANGER_RESOURCE_SERVICE_NAME",
+            "RANGER_SERVICE_NAME",
+        ),
+    )
+
+    # Static tag-policy service. config/policies.yaml is reconciled here at startup.
+    ranger_tag_service_name: str = "dev_tag"
+    ranger_reconcile_tag_policies_on_startup: bool = True
+
     ranger_dry_run: bool = True
     ranger_timeout_seconds: float = 15.0
     ranger_allow_policy_delete: bool = False
@@ -85,18 +101,20 @@ class Settings(BaseSettings):
     trino_http_scheme: Literal["http", "https"] = "http"
     trino_timeout_seconds: float = 20.0
 
-    # Webhook integration secret
+    # Webhook integration secret.
     openmetadata_webhook_secret: SecretStr | None = None
 
-    # Bounded Data Value Scanner settings
+    # Bounded Data Value Scanner settings.
     sample_scan_enabled: bool = True
     sample_scan_max_rows: int = 500
     sample_scan_timeout_seconds: float = 10.0
     data_value_scan_config_path: Path = Path("config/data_value_scan.yaml")
 
     classification_rules_path: Path = Path("config/classification_rules.yaml")
-    policy_mappings_path: Path = Path("config/policies.yaml")
 
+    # Kept under the old setting name to avoid breaking existing .env files.
+    # Semantics are now a static Ranger tag-policy catalog, not per-asset mappings.
+    policy_mappings_path: Path = Path("config/policies.yaml")
 
     auto_start_execution_worker: bool = True
     execution_worker_id: str = "execution-worker-1"
