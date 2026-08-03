@@ -37,7 +37,7 @@ Ranger -> Trino enforcement
 1. **Classification**
    - `POST /api/v1/classifications/run`
    - Worker reads the current OpenMetadata entity.
-   - `classification_rules.yaml` drives deterministic matching.
+   - the ACTIVE PostgreSQL classification rule set drives deterministic matching.
    - OpenMetadata owns tags and native Suggestions.
 
 2. **Policy management**
@@ -62,3 +62,13 @@ python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
 See `.context/00_START_HERE.md` and `VALIDATION.md`.
+
+## Classification rule management
+
+Classification rules are JSON-only and DB-backed. Upload with
+`POST /api/v1/classification-rules/import`; PostgreSQL
+`classification_rule_sets` is the runtime source of truth. Exactly one
+`default` rule set is active at a time. The worker evaluates current
+OpenMetadata metadata against that active rule set.
+
+See `CLASSIFICATION_RULES.md` for upload, activation, rollback and run examples.

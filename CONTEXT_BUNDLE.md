@@ -247,7 +247,7 @@ INV-018. All Python imports are at file headers; inline/deferred imports are for
 
 - API accepts target identity.
 - Worker reads current metadata from OpenMetadata.
-- `classification_rules.yaml` performs deterministic matching.
+- the ACTIVE PostgreSQL classification rule set performs deterministic matching.
 - Uncertain results use OpenMetadata Suggestions.
 - Trusted deterministic rules may directly apply tags only under the explicit feature flag.
 - Confirmed tags may be mirrored to Ranger's tag store.

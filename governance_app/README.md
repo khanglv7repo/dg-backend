@@ -48,7 +48,7 @@ CLASSIFY_ASSET_FROM_OM
 read current OpenMetadata entity
        |
        v
-classification_rules.yaml
+ACTIVE PostgreSQL classification rule set
        |
        +--> native OpenMetadata Suggestion
        |
