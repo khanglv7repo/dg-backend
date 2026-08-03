@@ -10,7 +10,10 @@ from app.jobs.handlers import (
 
 
 def test_agent_and_execution_openmetadata_bots_must_be_distinct() -> None:
-    with pytest.raises(ValidationError, match="must be different machine identities"):
+    with pytest.raises(
+        ValidationError,
+        match="must be different machine identities",
+    ):
         Settings(
             openmetadata_execution_bot_name="same-bot",
             openmetadata_agent_bot_name="same-bot",
@@ -21,7 +24,6 @@ def test_default_runtime_identities_are_machine_bots() -> None:
     settings = Settings()
     assert settings.openmetadata_execution_bot_name.endswith("-bot")
     assert settings.openmetadata_agent_bot_name.endswith("-bot")
-    assert settings.trino_verification_service_user.endswith("-bot")
 
 
 def test_execution_worker_routes_each_openmetadata_role_to_its_own_token() -> None:
@@ -40,12 +42,18 @@ def test_execution_worker_routes_each_openmetadata_role_to_its_own_token() -> No
             autoclassification.client.headers["Authorization"]
             == "Bearer autoclassification-token"
         )
-        assert auto_tag.client.headers["Authorization"] == "Bearer auto-tag-token"
-        assert ingestion.client.headers["Authorization"] == "Bearer ingestion-token"
+        assert (
+            auto_tag.client.headers["Authorization"]
+            == "Bearer auto-tag-token"
+        )
+        assert (
+            ingestion.client.headers["Authorization"]
+            == "Bearer ingestion-token"
+        )
     finally:
-        autoclassification.client.close()
-        auto_tag.client.close()
-        ingestion.client.close()
+        autoclassification.close()
+        auto_tag.close()
+        ingestion.close()
 
 
 def test_openmetadata_worker_bot_tokens_must_be_distinct() -> None:

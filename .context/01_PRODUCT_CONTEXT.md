@@ -2,38 +2,42 @@
 
 ## Objective
 
-Classify governed data assets, turn confirmed classifications into Apache Ranger policies, and verify effective access through Trino without building a second metadata-governance platform.
+Provide a small governance control plane that classifies assets using OpenMetadata metadata and manages desired Apache Ranger policies without replacing either OpenMetadata or Ranger.
 
-## Business problem
+## System responsibilities
 
-Metadata classification and access enforcement span multiple systems:
-
-1. OpenMetadata knows the asset, columns, owners, glossary, lineage, and confirmed tags.
-2. Classification logic decides whether metadata indicates sensitive data.
-3. Human reviewers must approve uncertain or AI-generated classifications.
-4. Ranger must enforce the desired policy.
-5. Trino must prove the policy is effective for controlled identities.
-
-A failure in any step can create a false sense of governance. The application therefore records compact cross-system evidence and retries side effects durably.
+1. OpenMetadata owns asset metadata, confirmed tags, Suggestions and reviewer workflows.
+2. Deterministic classification evaluates current OpenMetadata metadata using versioned rules.
+3. PostgreSQL owns desired Ranger policy state.
+4. Ranger owns enforcement.
+5. Trino is the governed query engine behind Ranger; backend-side query verification is not a production capability.
 
 ## Product boundary
 
-The application is not a replacement for OpenMetadata. It adds only:
+The backend adds:
 
 - deterministic exact/regex classification;
-- optional MCP-grounded LangGraph classification fallback;
-- native Suggestion creation;
+- native OpenMetadata Suggestion creation;
 - explicitly trusted direct tag application;
-- Ranger desired-state reconciliation;
-- Trino positive/negative verification;
-- durable retry, idempotency, and audit evidence.
+- confirmed-tag synchronization into Ranger's tag store;
+- native Ranger JSON policy import and desired-state storage;
+- explicit DB -> Ranger reconciliation;
+- durable jobs, idempotency and audit evidence.
+
+The backend does not add:
+
+- a second metadata catalog;
+- a custom human review UI;
+- a custom policy language;
+- automatic policy generation from OpenMetadata tags;
+- startup policy mutation;
+- production Trino verification jobs.
 
 ## Success criteria
 
-- A repeated OpenMetadata event does not duplicate work or policies.
-- Agent output cannot mutate governance state directly.
-- Human review remains visible in OpenMetadata.
-- Ranger changes are deterministic, owned, and reconcilable.
-- Trino verification records pass/fail without persisting business rows.
-- Runtime identities are machine Bots/service accounts, not employee accounts.
-- The codebase remains understandable as an MVC application.
+- OpenMetadata and Ranger remain authoritative in their respective domains.
+- Repeated policy import is idempotent and revisioned.
+- Explicit policy sync converges DB desired state to owned Ranger policies.
+- Unmanaged Ranger policies are never overwritten implicitly.
+- Missing identity headers grant no governance roles.
+- The core remains understandable as MVC + Service + Repository.

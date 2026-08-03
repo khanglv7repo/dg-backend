@@ -1,55 +1,59 @@
 # System Architecture
 
-## Context diagram
-
 ```text
-                    Human / CLI / future AI + MCP
+                    Human / CLI / future MCP
                                |
                                v
 +------------------------------------------------------------------+
 | Governance Backend                                               |
 |                                                                  |
 | FastAPI Control API                                              |
-|   - POST /classifications/run                                    |
-|   - POST /policies/import                                        |
-|   - POST /policies/sync                                          |
+|   /classifications/run                                           |
+|   /policies/import                                               |
+|   /policies/sync                                                 |
 |                                                                  |
 | PostgreSQL                                                       |
-|   - governance_jobs       durable execution queue                |
-|   - governance_policies   Ranger desired-state catalog           |
+|   governance_jobs       durable execution queue                  |
+|   governance_policies   Ranger desired-state catalog             |
 |                                                                  |
 | Execution Worker                                                 |
-|   - hydrate metadata from OpenMetadata                           |
-|   - deterministic classification / controlled tag write          |
-|   - Ranger policy reconciliation                                 |
-|   - confirmed-tag assignment synchronization                     |
-+---------------------------+----------------------+---------------+
-                            |                      |
-                            v                      v
-                     OpenMetadata             Apache Ranger
-                  metadata + tag truth       enforcement target
+|   OpenMetadata classification/tagging                            |
+|   Ranger policy reconciliation                                   |
+|   Ranger tag-assignment synchronization                          |
++----------------------+-------------------------+-----------------+
+                       |                         |
+                       v                         v
+                 OpenMetadata               Apache Ranger
+               metadata/tag truth          enforcement target
+                                                 |
+                                                 v
+                                               Trino
 ```
 
-## Application boundaries
+## Core capability 1 — Classification
 
-The backend exposes two primary business capabilities:
+- API accepts target identity.
+- Worker reads current metadata from OpenMetadata.
+- `classification_rules.yaml` performs deterministic matching.
+- Uncertain results use OpenMetadata Suggestions.
+- Trusted deterministic rules may directly apply tags only under the explicit feature flag.
+- Confirmed tags may be mirrored to Ranger's tag store.
 
-1. **Classification**
-   - target identity enters through REST/automation;
-   - Execution Worker reads the current asset from OpenMetadata;
-   - `classification_rules.yaml` drives deterministic exact/regex matching;
-   - trusted matches may apply tags to OpenMetadata under the existing feature flag;
-   - confirmed tags may be synchronized to Ranger's tag store as a technical integration concern.
+## Core capability 2 — Policy management
 
-2. **Policy management and reconciliation**
-   - native Ranger JSON is imported into PostgreSQL;
-   - `governance_policies` is desired state;
-   - API/MCP/CLI can create or update desired state without Ranger credentials;
-   - `SYNC_RANGER_POLICIES` performs DB -> Ranger reconciliation in the Execution Worker;
-   - TAG and RESOURCE policies share the same native document persistence and reconciler, but target different configured Ranger services.
+- Native Ranger JSON enters through API/CLI/future MCP.
+- `governance_policies` stores desired state.
+- Import does not mutate Ranger.
+- `/policies/sync` enqueues `SYNC_RANGER_POLICIES`.
+- Worker compares DB desired state with Ranger observed state.
+- Only backend-owned Ranger policies can be changed.
 
-## Future MCP boundary
+## Startup behavior
 
-A Governance MCP server should remain a thin adapter over the same application services used by REST. It may expose tools such as policy import/list/disable/sync and classification run. It must not reimplement Ranger/OpenMetadata clients and must not receive Ranger credentials.
+Startup starts the execution worker when configured. It does not seed policy YAML and does not automatically reconcile Ranger policies.
 
-OpenMetadata's own MCP remains the preferred metadata discovery interface for AI agents. The Governance MCP exists for backend-owned commands and desired-state management.
+## Future MCP
+
+Governance MCP is a thin adapter over the same application services used by REST. It may expose classification and policy-management commands. It does not implement Ranger logic and does not receive Ranger credentials.
+
+OpenMetadata MCP remains appropriate for metadata discovery/lineage.

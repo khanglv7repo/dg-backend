@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Annotated
 
-from fastapi import Header
+from fastapi import Depends, Header
+
+from app.core.config import Settings, get_settings
 
 
 @dataclass(frozen=True, slots=True)
@@ -16,9 +19,29 @@ class Actor:
 
 
 async def actor_from_headers(
-    x_actor_id: str = Header(default="local-user"),
-    x_actor_name: str = Header(default="Local User"),
-    x_actor_roles: str = Header(default="governance-admin"),
+    settings: Annotated[Settings, Depends(get_settings)],
+    x_actor_id: str | None = Header(default=None),
+    x_actor_name: str | None = Header(default=None),
+    x_actor_roles: str | None = Header(default=None),
 ) -> Actor:
-    roles = frozenset(part.strip() for part in x_actor_roles.split(",") if part.strip())
-    return Actor(subject=x_actor_id.strip(), display_name=x_actor_name.strip(), roles=roles)
+    # Header-based identity is for a trusted local/proxy boundary only.
+    # Critically, an omitted header must never become governance-admin.
+    if not settings.trusted_identity_headers:
+        return Actor(
+            subject="anonymous",
+            display_name="Anonymous",
+            roles=frozenset(),
+        )
+
+    roles = frozenset(
+        part.strip()
+        for part in (x_actor_roles or "").split(",")
+        if part.strip()
+    )
+    subject = (x_actor_id or "anonymous").strip() or "anonymous"
+    display_name = (x_actor_name or subject).strip() or subject
+    return Actor(
+        subject=subject,
+        display_name=display_name,
+        roles=roles,
+    )

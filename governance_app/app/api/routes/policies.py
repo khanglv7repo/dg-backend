@@ -19,6 +19,13 @@ from app.services.policy_sync import PolicySyncCommandService
 router = APIRouter()
 
 
+def _require_policy_reader(actor) -> None:
+    if not actor.has_any_role("governance-operator", "governance-admin"):
+        raise AuthorizationError(
+            "governance-operator or governance-admin role is required"
+        )
+
+
 @router.post(
     "/import",
     response_model=PolicyImportResponse,
@@ -49,7 +56,9 @@ def import_policy(
 def list_policies(
     db: DbSession,
     settings: AppSettings,
+    actor: CurrentActor,
 ) -> list[PolicyRecordResponse]:
+    _require_policy_reader(actor)
     values = PolicyCatalogService(db, settings).list_policies()
     return [PolicyRecordResponse.model_validate(item) for item in values]
 
@@ -64,8 +73,7 @@ def sync_policies(
     actor: CurrentActor,
     request: PolicySyncRequest | None = None,
 ) -> AcceptedResponse:
-    if not actor.has_any_role("governance-operator", "governance-admin"):
-        raise AuthorizationError("governance-operator or governance-admin role is required")
+    _require_policy_reader(actor)
     body = request or PolicySyncRequest()
     with db.begin():
         job = PolicySyncCommandService(db).enqueue(
@@ -82,7 +90,9 @@ def get_policy(
     policy_id: UUID,
     db: DbSession,
     settings: AppSettings,
+    actor: CurrentActor,
 ) -> PolicyRecordResponse:
+    _require_policy_reader(actor)
     policy = PolicyCatalogService(db, settings).get_policy(policy_id)
     return PolicyRecordResponse.model_validate(policy)
 

@@ -7,7 +7,6 @@ import httpx
 from app.clients.openmetadata import OpenMetadataClient
 from app.clients.ranger import RangerClient
 from app.models.enums import ReconciliationAction
-from app.schemas.policy import DesiredPolicy
 
 
 def test_openmetadata_column_update_uses_targeted_fqn_api_and_reads_back() -> None:
@@ -168,37 +167,3 @@ def test_openmetadata_native_tag_suggestion_payload() -> None:
     }
 
 
-def test_ranger_dry_run_does_not_mutate() -> None:
-    methods: list[str] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        methods.append(request.method)
-        return httpx.Response(404, json={"message": "not found"})
-
-    client = RangerClient(
-        base_url="http://ranger/service/public/v2/api",
-        username=None,
-        password=None,
-        service_name="trino",
-        dry_run=True,
-    )
-    client.client.close()
-    client.client = httpx.Client(
-        base_url="http://ranger/service/public/v2/api",
-        transport=httpx.MockTransport(handler),
-    )
-    policy = DesiredPolicy(
-        policy_key="pii-email:hive.sales.customers:email",
-        name="dg-pii-email",
-        description="Email policy",
-        service="trino",
-        resources={"table": ["hive.sales.customers"], "column": ["email"]},
-        groups=["pii_readers"],
-        accesses=["select"],
-        source_version="v1",
-    )
-
-    result = client.reconcile(policy)
-
-    assert result["action"] == ReconciliationAction.DRY_RUN.value
-    assert methods == ["GET"]

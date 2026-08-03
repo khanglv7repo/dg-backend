@@ -10,7 +10,6 @@ import httpx
 
 from app.core.errors import ExternalSystemError
 from app.models.enums import ReconciliationAction
-from app.schemas.policy import DesiredPolicy
 
 SERVER_MANAGED_POLICY_FIELDS = {
     "id",
@@ -20,6 +19,7 @@ SERVER_MANAGED_POLICY_FIELDS = {
     "updateTime",
     "createdBy",
     "updatedBy",
+    "resourceSignature",
 }
 
 
@@ -73,7 +73,9 @@ def normalize_policy(document: dict | None) -> dict | None:
     if isinstance(resources, dict):
         for resource in resources.values():
             if isinstance(resource, dict) and isinstance(resource.get("values"), list):
-                resource["values"] = sorted(str(value) for value in resource["values"])
+                resource["values"] = sorted(
+                    str(value) for value in resource["values"]
+                )
 
     for item_key in (
         "policyItems",
@@ -156,14 +158,6 @@ class RangerClient:
                 return None
             raise
 
-    def reconcile(self, desired: DesiredPolicy) -> dict[str, Any]:
-        """Compatibility adapter for the legacy custom DesiredPolicy model."""
-
-        return self.reconcile_document(
-            policy_key=desired.policy_key,
-            document=desired.ranger_document(),
-        )
-
     def reconcile_document(
         self,
         *,
@@ -195,11 +189,19 @@ class RangerClient:
             f"managed-by=dg-backend;policy-key={policy_key};"
             f"desired-sha256={desired_hash}"
         )
+        suffix = f" | {marker}"
+        max_description_length = 4000
+        max_base_length = max(0, max_description_length - len(suffix))
+
         outbound = deepcopy(clean)
-        outbound["description"] = f"{base_description} | {marker}"[:4000]
+        outbound["description"] = f"{base_description[:max_base_length]}{suffix}"
 
         existing = self.find_by_name(name)
-        observed_hash = canonical_hash(normalize_policy(existing) or {}) if existing else None
+        observed_hash = (
+            canonical_hash(normalize_policy(existing) or {})
+            if existing
+            else None
+        )
 
         if existing is not None:
             existing_owned = "managed-by=dg-backend" in str(
@@ -257,6 +259,7 @@ class RangerClient:
                 system="ranger",
                 retryable=False,
             )
+
         updated = self._request(
             "PUT",
             f"/policy/{policy_id}",
@@ -274,68 +277,6 @@ class RangerClient:
             "policy_id": str(policy_id),
             "document": updated,
         }
-
-    def disable_policy(self, policy: dict) -> dict[str, Any]:
-        policy_id = str(policy.get("id"))
-        doc = deepcopy(policy)
-        doc["isEnabled"] = False
-        desired_hash = canonical_hash(normalize_policy(doc) or {})
-        observed_hash = canonical_hash(normalize_policy(policy) or {})
-        if self.dry_run:
-            return {
-                "action": ReconciliationAction.DRY_RUN.value,
-                "desired_hash": desired_hash,
-                "observed_hash": observed_hash,
-                "policy_id": policy_id,
-                "document": doc,
-            }
-        updated = self._request("PUT", f"/policy/{policy_id}", json=doc)
-        return {
-            "action": ReconciliationAction.DISABLE.value,
-            "desired_hash": desired_hash,
-            "observed_hash": observed_hash,
-            "policy_id": policy_id,
-            "document": updated,
-        }
-
-    def delete_policy(self, policy: dict) -> dict[str, Any]:
-        policy_id = str(policy.get("id"))
-        observed_hash = canonical_hash(normalize_policy(policy) or {})
-        if self.dry_run:
-            return {
-                "action": ReconciliationAction.DRY_RUN.value,
-                "desired_hash": "",
-                "observed_hash": observed_hash,
-                "policy_id": policy_id,
-                "document": policy,
-            }
-        self._request("DELETE", f"/policy/{policy_id}")
-        return {
-            "action": ReconciliationAction.DELETE.value,
-            "desired_hash": "",
-            "observed_hash": observed_hash,
-            "policy_id": policy_id,
-            "document": {},
-        }
-
-    def reconcile_removal(
-        self,
-        policy_name: str,
-        allow_delete: bool = False,
-    ) -> dict[str, Any] | None:
-        existing = self.find_by_name(policy_name)
-        if not existing:
-            return None
-        existing_owned = "managed-by=dg-backend" in str(existing.get("description", ""))
-        if not existing_owned:
-            raise ExternalSystemError(
-                f"Ranger policy {policy_name!r} exists but is not owned by this backend",
-                system="ranger",
-                retryable=False,
-            )
-        if allow_delete:
-            return self.delete_policy(existing)
-        return self.disable_policy(existing)
 
     def _request(self, method: str, path: str, **kwargs) -> Any:
         try:

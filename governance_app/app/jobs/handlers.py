@@ -5,7 +5,6 @@ from sqlalchemy.orm import Session
 from app.clients.openmetadata import OpenMetadataClient
 from app.clients.ranger import RangerClient
 from app.clients.ranger_tags import RangerTagStoreClient
-from app.clients.trino import TrinoDBAPIExecutor
 from app.core.config import Settings
 from app.core.errors import ConfigurationError
 from app.models.enums import JobType
@@ -13,7 +12,6 @@ from app.schemas.events import MetadataEventRequest
 from app.services.asset_discovery import AssetDiscoveryService
 from app.services.classification import ClassificationService
 from app.services.classification_commands import OpenMetadataClassificationRunner
-from app.services.data_value_scanner import DataValueScannerService
 from app.services.openmetadata_governance import (
     ConfirmedTagApplicationService,
     OpenMetadataSuggestionService,
@@ -22,7 +20,6 @@ from app.services.policy_sync import (
     RangerPolicyCatalogSyncService,
     RangerTagAssignmentService,
 )
-from app.services.verification import VerificationService
 
 
 def _autoclassification_openmetadata_client(
@@ -72,19 +69,23 @@ def handle_create_om_suggestions(
     settings: Settings,
     payload: dict,
 ) -> dict:
-    return OpenMetadataSuggestionService(
-        session,
-        _auto_tag_openmetadata_client(settings),
-        bot_name=settings.openmetadata_execution_bot_name,
-    ).create(
-        classification_run_id=payload["classification_run_id"],
-        entity_type=payload["entity_type"],
-        entity_fqn=payload["entity_fqn"],
-        source_kind=payload["source_kind"],
-        source_version=payload["source_version"],
-        suggestions=list(payload.get("suggestions", [])),
-        correlation_id=payload.get("correlation_id"),
-    )
+    client = _auto_tag_openmetadata_client(settings)
+    try:
+        return OpenMetadataSuggestionService(
+            session,
+            client,
+            bot_name=settings.openmetadata_execution_bot_name,
+        ).create(
+            classification_run_id=payload["classification_run_id"],
+            entity_type=payload["entity_type"],
+            entity_fqn=payload["entity_fqn"],
+            source_kind=payload["source_kind"],
+            source_version=payload["source_version"],
+            suggestions=list(payload.get("suggestions", [])),
+            correlation_id=payload.get("correlation_id"),
+        )
+    finally:
+        client.close()
 
 
 def handle_apply_confirmed_tags(
@@ -92,18 +93,22 @@ def handle_apply_confirmed_tags(
     settings: Settings,
     payload: dict,
 ) -> dict:
-    return ConfirmedTagApplicationService(
-        session,
-        _auto_tag_openmetadata_client(settings),
-        bot_name=settings.openmetadata_execution_bot_name,
-    ).apply(
-        classification_run_id=payload.get("classification_run_id"),
-        entity_type=payload["entity_type"],
-        entity_fqn=payload["entity_fqn"],
-        entity_tags=list(payload.get("entity_tags", [])),
-        field_tags=dict(payload.get("field_tags", {})),
-        correlation_id=payload.get("correlation_id"),
-    )
+    client = _auto_tag_openmetadata_client(settings)
+    try:
+        return ConfirmedTagApplicationService(
+            session,
+            client,
+            bot_name=settings.openmetadata_execution_bot_name,
+        ).apply(
+            classification_run_id=payload.get("classification_run_id"),
+            entity_type=payload["entity_type"],
+            entity_fqn=payload["entity_fqn"],
+            entity_tags=list(payload.get("entity_tags", [])),
+            field_tags=dict(payload.get("field_tags", {})),
+            correlation_id=payload.get("correlation_id"),
+        )
+    finally:
+        client.close()
 
 
 def handle_sync_ranger_policies(
@@ -130,7 +135,10 @@ def handle_sync_ranger_policies(
             clients,
             tag_store,
         ).sync(
-            policy_ids=[str(value) for value in payload.get("policy_ids", [])],
+            policy_ids=[
+                str(value)
+                for value in payload.get("policy_ids", [])
+            ],
             correlation_id=payload.get("correlation_id"),
         )
     finally:
@@ -187,34 +195,8 @@ def handle_reconcile_ranger(
     payload: dict,
 ) -> dict:
     """Compatibility handler for already-queued v0.4 RECONCILE_RANGER jobs."""
+
     return handle_sync_ranger_tags(session, settings, payload)
-
-
-def handle_verify_trino(
-    session: Session,
-    settings: Settings,
-    payload: dict,
-) -> dict:
-    if not settings.trino_enabled:
-        raise ConfigurationError("Trino integration is disabled")
-    executor = TrinoDBAPIExecutor(
-        host=settings.trino_host,
-        port=settings.trino_port,
-        catalog=settings.trino_catalog,
-        schema=settings.trino_schema,
-        http_scheme=settings.trino_http_scheme,
-        timeout_seconds=settings.trino_timeout_seconds,
-    )
-    return VerificationService(session, executor).verify(
-        verification_group_id=payload["verification_group_id"],
-        verification_total=int(payload["verification_total"]),
-        policy_key=payload["policy_key"],
-        identity=payload["identity"],
-        sql=payload["sql"],
-        expected_allowed=bool(payload["expected_allowed"]),
-        classification_run_id=payload.get("classification_run_id"),
-        correlation_id=payload.get("correlation_id"),
-    )
 
 
 def handle_discover_unclassified_assets(
@@ -227,31 +209,17 @@ def handle_discover_unclassified_assets(
         if settings.openmetadata_enabled
         else None
     )
-    return AssetDiscoveryService(session, settings, client).discover(
-        correlation_id=payload.get("correlation_id")
-    )
-
-
-def handle_sample_column_values(
-    session: Session,
-    settings: Settings,
-    payload: dict,
-) -> dict:
-    om_client = (
-        _autoclassification_openmetadata_client(settings)
-        if settings.openmetadata_enabled
-        else None
-    )
-    return DataValueScannerService(
-        session,
-        settings,
-        om_client=om_client,
-    ).scan(
-        entity_type=payload.get("entity_type", "table"),
-        entity_fqn=payload["entity_fqn"],
-        fields=list(payload.get("fields", [])),
-        correlation_id=payload.get("correlation_id"),
-    )
+    try:
+        return AssetDiscoveryService(
+            session,
+            settings,
+            client,
+        ).discover(
+            correlation_id=payload.get("correlation_id")
+        )
+    finally:
+        if client is not None:
+            client.close()
 
 
 def _ingestion_openmetadata_client(
@@ -286,7 +254,10 @@ def _auto_tag_openmetadata_client(
     )
 
 
-def _ranger_policy_client(settings: Settings, service_name: str) -> RangerClient:
+def _ranger_policy_client(
+    settings: Settings,
+    service_name: str,
+) -> RangerClient:
     return RangerClient(
         base_url=settings.ranger_base_url,
         username=settings.ranger_service_account,
@@ -326,7 +297,5 @@ HANDLERS = {
     JobType.SYNC_RANGER_POLICIES: handle_sync_ranger_policies,
     JobType.SYNC_RANGER_TAGS: handle_sync_ranger_tags,
     JobType.RECONCILE_RANGER: handle_reconcile_ranger,
-    JobType.VERIFY_TRINO: handle_verify_trino,
     JobType.DISCOVER_UNCLASSIFIED_ASSETS: handle_discover_unclassified_assets,
-    JobType.SAMPLE_COLUMN_VALUES: handle_sample_column_values,
 }

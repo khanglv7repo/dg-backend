@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
 from app.core.config import Settings
@@ -17,7 +15,8 @@ TAG_POLICY = {
     "policyPriority": 0,
     "description": (
         "Allow governed PII readers to select resources tagged PII.Phone. "
-        "| managed-by=dg-backend;policy-key=tag-policy:PII.Phone;desired-sha256=abc"
+        "| managed-by=dg-backend;policy-key=tag-policy:PII.Phone;"
+        "desired-sha256=abc"
     ),
     "isAuditEnabled": True,
     "resources": {
@@ -29,7 +28,9 @@ TAG_POLICY = {
     },
     "policyItems": [
         {
-            "accesses": [{"type": "trino:select", "isAllowed": True}],
+            "accesses": [
+                {"type": "trino:select", "isAllowed": True}
+            ],
             "groups": ["pii_readers"],
             "delegateAdmin": False,
         }
@@ -55,7 +56,9 @@ RESOURCE_POLICY = {
     },
     "policyItems": [
         {
-            "accesses": [{"type": "execute", "isAllowed": True}],
+            "accesses": [
+                {"type": "execute", "isAllowed": True}
+            ],
             "users": ["trino"],
             "delegateAdmin": True,
         }
@@ -70,7 +73,6 @@ def _settings() -> Settings:
         _env_file=None,
         ranger_service_name="dev_trino",
         ranger_tag_service_name="dev_tag",
-        policy_mappings_path=Path("config/policies.yaml"),
     )
 
 
@@ -90,20 +92,28 @@ def test_imports_native_tag_policy_and_strips_runtime_marker(session) -> None:
     assert policy.policy_key == "dev_tag:dg-tag-pii-phone"
     assert policy.policy_kind == "TAG"
     assert "managed-by=dg-backend" not in policy.document["description"]
-    assert policy.document["resources"]["tag"]["values"] == ["PII.Phone"]
+    assert (
+        policy.document["resources"]["tag"]["values"]
+        == ["PII.Phone"]
+    )
 
 
 def test_reimport_updates_same_policy_revision(session) -> None:
     service = PolicyCatalogService(session, _settings())
+
     with session.begin():
         first, _, _ = service.import_document(
             RESOURCE_POLICY,
             actor_id="test",
             actor_name="Test",
         )
+
     assert first.revision == 1
 
-    changed_document = {**RESOURCE_POLICY, "description": "Updated description"}
+    changed_document = {
+        **RESOURCE_POLICY,
+        "description": "Updated description",
+    }
     with session.begin():
         second, created, changed = service.import_document(
             changed_document,
@@ -118,9 +128,22 @@ def test_reimport_updates_same_policy_revision(session) -> None:
 
 
 def test_rejects_policy_for_unknown_ranger_service(session) -> None:
-    document = {**RESOURCE_POLICY, "service": "other_service"}
-    with session.begin(), pytest.raises(ConfigurationError, match="unsupported Ranger service"):
-        PolicyCatalogService(session, _settings()).import_document(
+    document = {
+        **RESOURCE_POLICY,
+        "service": "other_service",
+    }
+
+    with (
+        session.begin(),
+        pytest.raises(
+            ConfigurationError,
+            match="unsupported Ranger service",
+        ),
+    ):
+        PolicyCatalogService(
+            session,
+            _settings(),
+        ).import_document(
             document,
             actor_id="test",
             actor_name="Test",

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 from pydantic import ValidationError as PydanticValidationError
@@ -10,12 +9,11 @@ from app.core.config import Settings
 from app.core.errors import ConfigurationError, ValidationError
 from app.repositories.audit import AuditRepository
 from app.repositories.policies import PolicyRepository
-from app.rules.policy_mapping import PolicyMappingResolver
 from app.schemas.policy_catalog import RangerPolicyDocument
 
 
 class PolicyCatalogService:
-    """Own the backend desired-state policy catalog stored in PostgreSQL."""
+    """Own the PostgreSQL desired-state Ranger policy catalog."""
 
     def __init__(self, session: Session, settings: Settings) -> None:
         self.session = session
@@ -44,6 +42,7 @@ class PolicyCatalogService:
                 "invalid native Ranger policy JSON",
                 details={"errors": exc.errors(include_url=False)},
             ) from exc
+
         native = parsed.native_document()
         service = str(native["service"])
         name = str(native["name"])
@@ -108,41 +107,6 @@ class PolicyCatalogService:
             },
         )
         return policy
-
-    def seed_legacy_catalog_if_empty(self) -> int:
-        """One-time compatibility seed from the old YAML tag-policy catalog.
-
-        PostgreSQL remains the source of truth after the first seed. The YAML is
-        never consulted by the normal DB-backed reconciler.
-        """
-
-        if self.repository.count() > 0:
-            return 0
-        path: Path = self.settings.resolve_path(self.settings.policy_mappings_path)
-        if not path.exists():
-            return 0
-
-        resolver = PolicyMappingResolver.from_path(path)
-        desired = resolver.resolve_all(service=self.settings.ranger_tag_service_name)
-        seeded = 0
-        for policy in desired:
-            document = policy.ranger_document()
-            document.update(
-                {
-                    "serviceType": "tag",
-                    "policyType": 0,
-                    "policyPriority": 0,
-                    "isAuditEnabled": True,
-                    "isDenyAllElse": False,
-                }
-            )
-            _, created, _ = self.import_document(
-                document,
-                actor_id="system:legacy-policy-seed",
-                actor_name="Legacy Policy Seed",
-            )
-            seeded += int(created)
-        return seeded
 
     def _policy_kind(self, document: dict[str, Any]) -> str:
         service = str(document.get("service") or "")

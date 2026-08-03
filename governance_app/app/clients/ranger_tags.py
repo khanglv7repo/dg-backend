@@ -13,7 +13,7 @@ class RangerTagStoreClient:
 
     This is the Flow-B boundary. It synchronizes the current Confirmed
     OpenMetadata tag state into Ranger's tag store; it never creates access
-    policies. Access policies are independently reconciled at backend startup.
+    policies. Access policies are independently reconciled from PostgreSQL by explicit policy-sync jobs.
     """
 
     def __init__(

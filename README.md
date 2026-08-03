@@ -1,39 +1,64 @@
-# OpenMetadata-Native Governance Platform v0.4
+# Data Governance Backend
 
-This package implements the agreed simplified architecture:
+Current backend architecture (v0.6.1):
 
-- **`governance_app/`**: FastAPI backend Control API & Execution Worker (MVC + Service + Repository);
-- **`governance_agent/`**: Standalone AI Agent project (LangGraph + MCP), connected directly to OpenMetadata;
-- **PostgreSQL durable queue**: `governance_jobs` table for backend execution tasks;
-- OpenMetadata native Suggestions and review;
-- Separate machine Bot/service credentials for every runtime role.
+- **OpenMetadata** is the source of truth for metadata and confirmed tags.
+- **PostgreSQL `governance_policies`** is the source of truth for desired Ranger policies.
+- **PostgreSQL `governance_jobs`** is the durable execution queue.
+- **Apache Ranger** is the enforcement target.
+- **Trino remains the governed query engine**, but the backend no longer performs Trino verification jobs.
+- Policy input uses **native Ranger policy JSON**. There is no backend-specific policy DSL.
+- A future Governance MCP server should be a thin adapter over the same backend application services and must not receive Ranger credentials.
 
 ```text
-OpenMetadata REST/Events ----> Governance Backend (governance_app/)
-                                  |
-                           PostgreSQL jobs
-                                  |
-                                  v
-                          Execution Worker
-                          OM REST Bot / Ranger / Trino
+Human / CLI / future MCP
+          |
+          v
+   FastAPI Control API
+      /          \
+     v            v
+classification  governance_policies
+     |            |
+     v            v
+OpenMetadata  governance_jobs
+     |            |
+     |            v
+     |       Execution Worker
+     |            |
+     +--> Ranger Tag Store
+                  |
+                  +--> Ranger Policies
 
-OpenMetadata MCP / REST <----> Governance Agent (governance_agent/)
-                               LLM + LangGraph Agent
+Ranger -> Trino enforcement
 ```
 
-## Package layout
+## Core capabilities
 
-- `.context/` — task-routed context engineering bundle: business, rules, invariants, decisions, source map, patterns, contracts, tests, and playbook.
-- `governance_app/` — runnable FastAPI application, migrations, workers, configuration, and tests.
-- `CONTEXT_BUNDLE.md` — concatenated English context for environments that prefer a single file.
-- `VALIDATION.md` — build and test evidence plus live limitations.
+1. **Classification**
+   - `POST /api/v1/classifications/run`
+   - Worker reads the current OpenMetadata entity.
+   - `classification_rules.yaml` drives deterministic matching.
+   - OpenMetadata owns tags and native Suggestions.
 
-## Runtime identities
+2. **Policy management**
+   - `POST /api/v1/policies/import`
+   - `GET /api/v1/policies`
+   - `GET /api/v1/policies/{id}`
+   - `DELETE /api/v1/policies/{id}` performs a soft disable.
+   - `POST /api/v1/policies/sync` explicitly enqueues DB -> Ranger reconciliation.
 
-- `governance-agent-bot`: read-only MCP Bot.
-- `governance-execution-bot`: controlled REST mutation Bot.
-- Ranger service identity: Execution Worker only.
-- Trino verification service identity: Execution Worker only.
-- Human personal accounts: native OpenMetadata review/administration only.
+## Important runtime rule
 
-Start with `.context/00_START_HERE.md`.
+Backend startup does **not** seed policy YAML and does **not** automatically mutate or sync Ranger policies. Policy desired state enters through the policy API (or a future MCP/CLI adapter) and is synchronized explicitly.
+
+## Development
+
+```bash
+conda activate dg_backend
+cd governance_app
+alembic upgrade head
+pytest -q
+python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+```
+
+See `.context/00_START_HERE.md` and `VALIDATION.md`.

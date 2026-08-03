@@ -9,10 +9,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    """Runtime configuration for one FastAPI app and two worker roles.
+    """Runtime configuration for the FastAPI API and execution worker.
 
-    All external credentials are machine identities. Runtime components must not
-    use a personal OpenMetadata, Ranger, Trino, or LLM account.
+    External credentials are machine identities. Runtime components must not
+    use personal OpenMetadata or Ranger accounts.
     """
 
     model_config = SettingsConfigDict(
@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     api_prefix: str = "/api/v1"
     database_url: str = "sqlite+pysqlite:///./governance.db"
 
-    # OpenMetadata identities used only by the execution worker.
+    # OpenMetadata identities used by backend workflows.
     openmetadata_enabled: bool = False
     openmetadata_base_url: str = "http://localhost:8585/api"
     openmetadata_execution_bot_name: str = "governance-execution-bot"
@@ -50,7 +50,8 @@ class Settings(BaseSettings):
     openmetadata_timeout_seconds: float = 15.0
     trusted_auto_apply_enabled: bool = False
 
-    # Phase 2-3 agent identity: separate read-only OpenMetadata Bot through MCP.
+    # Optional AI/Agent configuration is retained outside the core policy path.
+    # It can be removed in a separate cleanup if the standalone agent is retired.
     agent_enabled: bool = False
     agent_name: str = "classification-agent"
     agent_graph_version: str = "classification-graph-v1"
@@ -60,8 +61,6 @@ class Settings(BaseSettings):
     openmetadata_agent_bot_token: SecretStr | None = None
     openmetadata_mcp_timeout_seconds: float = 30.0
     agent_include_lineage: bool = True
-
-    # LLM provider machine credential, available only to the agent worker process.
     llm_provider: str = "openai"
     llm_model: str = "gpt-5-mini"
     llm_api_key: SecretStr | None = None
@@ -73,7 +72,7 @@ class Settings(BaseSettings):
     ranger_service_account: str | None = None
     ranger_service_secret: SecretStr | None = None
 
-    # Resource service receiving RangerServiceResource entries used by the Trino plugin.
+    # Resource service receiving Ranger resource/tag assignments.
     # RANGER_SERVICE_NAME remains supported so the existing local .env does not break.
     ranger_service_name: str = Field(
         default="trino",
@@ -82,39 +81,15 @@ class Settings(BaseSettings):
             "RANGER_SERVICE_NAME",
         ),
     )
-
-    # Static tag-policy service. config/policies.yaml is reconciled here at startup.
     ranger_tag_service_name: str = "dev_tag"
-    ranger_reconcile_tag_policies_on_startup: bool = True
-
     ranger_dry_run: bool = True
     ranger_timeout_seconds: float = 15.0
-    ranger_allow_policy_delete: bool = False
 
-    # Trino controlled verification identity. It is not a personal user account.
-    trino_enabled: bool = False
-    trino_host: str = "localhost"
-    trino_port: int = 8080
-    trino_catalog: str = "hive"
-    trino_schema: str = "default"
-    trino_verification_service_user: str = "governance-verifier-bot"
-    trino_http_scheme: Literal["http", "https"] = "http"
-    trino_timeout_seconds: float = 20.0
-
-    # Webhook integration secret.
+    # OpenMetadata webhook integration secret.
     openmetadata_webhook_secret: SecretStr | None = None
 
-    # Bounded Data Value Scanner settings.
-    sample_scan_enabled: bool = True
-    sample_scan_max_rows: int = 500
-    sample_scan_timeout_seconds: float = 10.0
-    data_value_scan_config_path: Path = Path("config/data_value_scan.yaml")
 
     classification_rules_path: Path = Path("config/classification_rules.yaml")
-
-    # Kept under the old setting name to avoid breaking existing .env files.
-    # Semantics are now a static Ranger tag-policy catalog, not per-asset mappings.
-    policy_mappings_path: Path = Path("config/policies.yaml")
 
     auto_start_execution_worker: bool = True
     execution_worker_id: str = "execution-worker-1"
@@ -122,6 +97,10 @@ class Settings(BaseSettings):
     worker_poll_seconds: float = 1.0
     worker_claim_batch: int = Field(default=8, ge=1, le=100)
     worker_stale_after_seconds: int = Field(default=300, ge=30)
+
+    # Local/development deployments may trust identity headers from the caller.
+    # Missing headers never grant a role. Set false when the API is not behind a
+    # trusted identity-aware proxy/gateway.
     trusted_identity_headers: bool = True
 
     @field_validator("api_prefix")

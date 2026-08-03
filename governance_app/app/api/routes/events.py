@@ -16,8 +16,7 @@ def accept_metadata_event(
 ) -> AcceptedResponse:
     """Accept an OpenMetadata event or manual classification trigger.
 
-    The API only creates durable work. Deterministic and Agent processing run in
-    separate worker roles that share this application's source code and database.
+    The API only creates durable work. Execution happens through PostgreSQL-backed worker jobs.
     """
     with db.begin():
         job = IntakeService(db, settings).accept_metadata_event(request)

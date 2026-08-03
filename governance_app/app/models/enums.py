@@ -17,25 +17,18 @@ class JobType(StrEnum):
     CREATE_OM_SUGGESTIONS = "CREATE_OM_SUGGESTIONS"
     APPLY_CONFIRMED_TAGS = "APPLY_CONFIRMED_TAGS"
 
-    # Policy desired state is stored in PostgreSQL and reconciled by the worker.
     SYNC_RANGER_POLICIES = "SYNC_RANGER_POLICIES"
-
-    # Confirmed OpenMetadata tags are synchronized independently into Ranger's
-    # tag store. This does not create access policies.
     SYNC_RANGER_TAGS = "SYNC_RANGER_TAGS"
 
-    # Kept so already-queued v0.4 jobs remain claimable during a local upgrade.
+    # Kept temporarily so already-queued pre-v0.6 jobs remain claimable.
     RECONCILE_RANGER = "RECONCILE_RANGER"
 
-    VERIFY_TRINO = "VERIFY_TRINO"
     DISCOVER_UNCLASSIFIED_ASSETS = "DISCOVER_UNCLASSIFIED_ASSETS"
-    SAMPLE_COLUMN_VALUES = "SAMPLE_COLUMN_VALUES"
 
 
 class ClassificationSource(StrEnum):
     DETERMINISTIC = "DETERMINISTIC"
     AGENT = "AGENT"
-    VALUE_SCANNER = "VALUE_SCANNER"
 
 
 class ClassificationAction(StrEnum):
@@ -43,7 +36,6 @@ class ClassificationAction(StrEnum):
     OPENMETADATA_SUGGESTION = "OPENMETADATA_SUGGESTION"
     AUTO_APPLY = "AUTO_APPLY"
     AGENT_FALLBACK = "AGENT_FALLBACK"
-    SAMPLE_VALUE_FALLBACK = "SAMPLE_VALUE_FALLBACK"
 
 
 class ReconciliationAction(StrEnum):

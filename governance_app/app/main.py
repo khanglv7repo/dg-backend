@@ -18,10 +18,7 @@ from app.core.errors import (
     ValidationError,
 )
 from app.core.logging import configure_logging
-from app.db.session import SessionLocal
 from app.models.enums import JobType
-from app.services.policy_catalog import PolicyCatalogService
-from app.services.policy_sync import PolicySyncCommandService
 from app.workers.base import Worker
 
 settings = get_settings()
@@ -29,41 +26,13 @@ configure_logging(settings.app_log_level)
 logger = logging.getLogger(__name__)
 
 
-def _prepare_policy_catalog() -> tuple[int, str]:
-    """Seed legacy YAML once, then enqueue durable DB -> Ranger reconciliation."""
-
-    with SessionLocal() as session, session.begin():
-        seeded = PolicyCatalogService(session, settings).seed_legacy_catalog_if_empty()
-        job = PolicySyncCommandService(session).enqueue(
-            correlation_id="startup-policy-sync",
-            actor_id="system:startup",
-            actor_name="Application Startup",
-        )
-        return seeded, str(job.id)
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     worker = None
     worker_thread = None
 
-    # Policy mutation is never performed inside the API lifespan. Startup only
-    # seeds the DB catalog once (for migration compatibility) and creates a
-    # durable execution-worker job.
-    if (
-        settings.ranger_enabled
-        and settings.ranger_reconcile_tag_policies_on_startup
-        and settings.app_env != "test"
-    ):
-        seeded, job_id = _prepare_policy_catalog()
-        app.state.ranger_policy_sync_job_id = job_id
-        logger.info(
-            "Ranger policy sync queued: job_id=%s legacy_seeded=%s dry_run=%s",
-            job_id,
-            seeded,
-            settings.ranger_dry_run,
-        )
-
+    # Startup has no policy side effects. Desired Ranger policy state is changed
+    # through the policy API and reconciled only by explicit durable sync jobs.
     if settings.auto_start_execution_worker and settings.app_env != "test":
         worker = Worker(
             role="execution",
@@ -87,7 +56,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="OpenMetadata-Native Governance Platform",
-    version="0.6.0",
+    version="0.6.1",
     description=(
         "Governance control plane for OpenMetadata classification/tagging and "
         "PostgreSQL desired-state Ranger policy reconciliation."
