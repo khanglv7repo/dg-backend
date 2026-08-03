@@ -8,8 +8,6 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from app.api.router import api_router
-from app.clients.ranger import RangerClient
-from app.clients.ranger_tags import RangerTagStoreClient
 from app.core.config import get_settings
 from app.core.errors import (
     AuthorizationError,
@@ -20,8 +18,10 @@ from app.core.errors import (
     ValidationError,
 )
 from app.core.logging import configure_logging
+from app.db.session import SessionLocal
 from app.models.enums import JobType
-from app.services.policy_sync import RangerTagPolicyCatalogService
+from app.services.policy_catalog import PolicyCatalogService
+from app.services.policy_sync import PolicySyncCommandService
 from app.workers.base import Worker
 
 settings = get_settings()
@@ -29,38 +29,17 @@ configure_logging(settings.app_log_level)
 logger = logging.getLogger(__name__)
 
 
-def _ranger_secret() -> str | None:
-    if settings.ranger_service_secret is None:
-        return None
-    return settings.ranger_service_secret.get_secret_value()
+def _prepare_policy_catalog() -> tuple[int, str]:
+    """Seed legacy YAML once, then enqueue durable DB -> Ranger reconciliation."""
 
-
-def _reconcile_ranger_tag_policy_catalog() -> dict:
-    policy_client = RangerClient(
-        base_url=settings.ranger_base_url,
-        username=settings.ranger_service_account,
-        password=_ranger_secret(),
-        service_name=settings.ranger_tag_service_name,
-        dry_run=settings.ranger_dry_run,
-        timeout=settings.ranger_timeout_seconds,
-    )
-    tag_store = RangerTagStoreClient(
-        base_url=settings.ranger_tag_store_base_url,
-        username=settings.ranger_service_account,
-        password=_ranger_secret(),
-        resource_service_name=settings.ranger_service_name,
-        dry_run=settings.ranger_dry_run,
-        timeout=settings.ranger_timeout_seconds,
-    )
-    try:
-        return RangerTagPolicyCatalogService(
-            settings,
-            policy_client,
-            tag_store,
-        ).reconcile()
-    finally:
-        tag_store.close()
-        policy_client.close()
+    with SessionLocal() as session, session.begin():
+        seeded = PolicyCatalogService(session, settings).seed_legacy_catalog_if_empty()
+        job = PolicySyncCommandService(session).enqueue(
+            correlation_id="startup-policy-sync",
+            actor_id="system:startup",
+            actor_name="Application Startup",
+        )
+        return seeded, str(job.id)
 
 
 @asynccontextmanager
@@ -68,22 +47,21 @@ async def lifespan(app: FastAPI):
     worker = None
     worker_thread = None
 
-    # Flow A. This does not read OpenMetadata and does not wait for any asset.
-    # With RANGER_DRY_RUN=false, a backend restart makes config/policies.yaml
-    # converge into the Ranger tag service before the execution worker starts.
+    # Policy mutation is never performed inside the API lifespan. Startup only
+    # seeds the DB catalog once (for migration compatibility) and creates a
+    # durable execution-worker job.
     if (
         settings.ranger_enabled
         and settings.ranger_reconcile_tag_policies_on_startup
         and settings.app_env != "test"
     ):
-        result = _reconcile_ranger_tag_policy_catalog()
-        app.state.ranger_tag_policy_catalog = result
+        seeded, job_id = _prepare_policy_catalog()
+        app.state.ranger_policy_sync_job_id = job_id
         logger.info(
-            "Ranger tag-policy startup reconcile complete: "
-            "tag_service=%s policies=%s dry_run=%s",
-            result["tag_service"],
-            result["policies"],
-            result["dry_run"],
+            "Ranger policy sync queued: job_id=%s legacy_seeded=%s dry_run=%s",
+            job_id,
+            seeded,
+            settings.ranger_dry_run,
         )
 
     if settings.auto_start_execution_worker and settings.app_env != "test":
@@ -109,10 +87,10 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="OpenMetadata-Native Governance Platform",
-    version="0.5.0",
+    version="0.6.0",
     description=(
-        "FastAPI governance control plane with independent Ranger tag-policy "
-        "and OpenMetadata tag-assignment flows."
+        "Governance control plane for OpenMetadata classification/tagging and "
+        "PostgreSQL desired-state Ranger policy reconciliation."
     ),
     lifespan=lifespan,
 )

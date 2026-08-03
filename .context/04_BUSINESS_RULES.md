@@ -2,9 +2,9 @@
 
 ## Classification
 
-BR-001. Deterministic rules always run before Agent fallback.
+BR-001. Deterministic rules always run before optional fallback behavior.
 
-BR-002. Exact/regex results are reproducible from the normalized event and versioned YAML configuration.
+BR-002. Exact/regex results are reproducible from current OpenMetadata metadata and versioned `classification_rules.yaml` configuration.
 
 BR-003. A result is ambiguous when the same target receives more than one distinct tag.
 
@@ -15,13 +15,9 @@ BR-004. Trusted auto-apply requires all conditions:
 - no ambiguity;
 - `TRUSTED_AUTO_APPLY_ENABLED=true`.
 
-BR-005. Agent fallback may run only when `AGENT_ENABLED=true` and the deterministic outcome is `NO_MATCH` or `AMBIGUOUS`.
+BR-005. Manual classification commands contain only the target identity. The Execution Worker reads current metadata from OpenMetadata before evaluating rules.
 
-BR-006. Agent output is constrained to the configured governed tag allow-list.
-
-BR-007. Agent output never auto-applies. Non-empty Agent output always becomes native OpenMetadata Suggestions.
-
-BR-008. Empty Agent output creates a completed classification run with no mutation job.
+BR-006. OpenMetadata remains the source of truth for metadata and assigned/confirmed tags.
 
 ## OpenMetadata
 
@@ -35,27 +31,29 @@ BR-013. Existing unrelated tags must be preserved.
 
 BR-014. Every controlled direct write requires read-back verification.
 
-## Ranger
+## Ranger policy catalog
 
-BR-020. Ranger policies are generated only from confirmed OpenMetadata tags.
+BR-020. PostgreSQL `governance_policies` is the runtime source of truth for desired Ranger policies.
 
-BR-021. One tag must resolve to zero or exactly one active mapping. More than one mapping is configuration error.
+BR-021. Policy import accepts native Ranger policy JSON. The backend does not define a second business policy language.
 
-BR-022. A mapping may generate one policy per tagged column.
+BR-022. A desired policy may target only the configured Ranger tag service or configured Ranger resource service.
 
-BR-023. The application mutates only policies it owns, identified by its management marker.
+BR-023. Tag policies target the tag service and contain only the `tag` resource. Resource policies target the resource service and must not contain the `tag` resource.
 
-BR-024. Ranger dry-run is the default and must not make mutation requests.
+BR-024. The application mutates only policies it owns, identified by the `managed-by=dg-backend` marker.
 
-BR-025. No matching enforcement mapping is a valid classified-but-unenforced outcome and must be audited.
+BR-025. Ranger dry-run is the default and must not make mutation requests.
 
-## Trino
+BR-026. Disabling/removing a desired policy is explicit. Absence of a DB row is never interpreted as permission to delete an arbitrary Ranger policy.
 
-BR-030. Verification occurs only after a non-dry-run Ranger reconciliation that can affect policy state.
+BR-027. `config/policies.yaml` is migration/bootstrap seed input only. After the DB catalog contains policies, normal reconciliation does not read policy YAML.
 
-BR-031. Verification stores query fingerprints and outcomes, never business result rows.
+## Ranger tag assignment
 
-BR-032. A verification group completes when all expected cases are recorded.
+BR-030. Confirmed OpenMetadata tag FQNs are synchronized to Ranger with the same tag names; there is no configurable OM-tag-to-Ranger-tag business mapping.
+
+BR-031. Tag assignment synchronization is independent from policy desired-state synchronization.
 
 ## Identity
 
@@ -63,18 +61,18 @@ BR-040. Runtime components must use Bot/service identities, never personal accou
 
 BR-041. OpenMetadata Agent Bot, Auto-classification Bot, Auto-tag Bot, and Ingestion Bot must be distinct machine identities.
 
-BR-042. Agent Worker must not receive Ranger, Trino, or OpenMetadata mutation credentials.
+BR-042. AI/MCP-facing components must not receive Ranger service credentials. Ranger mutation remains an Execution Worker capability.
 
 BR-043. Execution Worker must not require an LLM provider key.
 
-BR-044. The upstream metadata-ingestion workflow and asset discovery use `OM_INGESTION_BOT_TOKEN`; classification metadata reads use `OM_AUTOCLASSIFICATION_BOT_TOKEN`; native Suggestions, trusted tag writes, and their read-back use `OM_AUTO_TAG_BOT_TOKEN`. No ingestion flow may use an admin token or admin-login fallback.
+BR-044. The upstream metadata-ingestion workflow and asset discovery use `OM_INGESTION_BOT_TOKEN`; classification metadata reads use `OM_AUTOCLASSIFICATION_BOT_TOKEN`; native Suggestions, trusted tag writes, and their read-back use `OM_AUTO_TAG_BOT_TOKEN`.
 
 ## Jobs
 
-BR-050. Every logical work item has a deterministic idempotency key.
+BR-050. External side effects are executed through durable PostgreSQL jobs.
 
-BR-051. Agent Worker claims only `AGENT_CLASSIFY`.
+BR-051. `SYNC_RANGER_POLICIES` is the only new-policy reconciliation job for the DB-backed policy catalog.
 
-BR-052. Execution Worker excludes `AGENT_CLASSIFY`.
+BR-052. `SYNC_RANGER_TAGS` synchronizes confirmed OpenMetadata tag assignments and never creates access policies.
 
 BR-053. Retryable failures use bounded exponential backoff; exhausted/non-retryable failures become `DEAD`.

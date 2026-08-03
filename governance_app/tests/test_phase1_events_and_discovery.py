@@ -14,10 +14,8 @@ def test_webhook_adapter_auth_verification(session) -> None:
     settings = Settings(openmetadata_webhook_secret=SecretStr("super-secret"))
     adapter = OpenMetadataEventAdapterService(session, settings)
 
-    # Valid secret
     adapter.verify_webhook_token("super-secret")
 
-    # Invalid secret
     with pytest.raises(AuthorizationError):
         adapter.verify_webhook_token("wrong-secret")
 
@@ -76,11 +74,18 @@ def test_webhook_adapter_confirmed_tag_change(session) -> None:
     with session.begin():
         job_ids = adapter.process_change_event(raw_event)
 
-    # Should enqueue both RECONCILE_RANGER (for tag change) and CLASSIFY_ASSET (for fields changed)
-    assert len(job_ids) == 2
-    types = {JobRepository(session).get(jid).job_type for jid in job_ids}
-    assert JobType.RECONCILE_RANGER.value in types
-    assert JobType.CLASSIFY_ASSET.value in types
+    # Tag lifecycle is separate from classification. A tag-only change triggers
+    # live OpenMetadata read-back and Ranger tag-assignment sync, but must not
+    # reclassify the same asset and create an event loop.
+    assert len(job_ids) == 1
+    job = JobRepository(session).get(job_ids[0])
+    assert job.job_type == JobType.SYNC_RANGER_TAGS.value
+    assert job.payload == {
+        "entity_type": "table",
+        "entity_fqn": "hive.sales.customers",
+        "classification_run_id": None,
+        "correlation_id": "om-event-evt-002",
+    }
 
 
 def test_watermark_repository(session) -> None:

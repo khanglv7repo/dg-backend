@@ -12,17 +12,19 @@ class JobStatus(StrEnum):
 
 class JobType(StrEnum):
     CLASSIFY_ASSET = "CLASSIFY_ASSET"
+    CLASSIFY_ASSET_FROM_OM = "CLASSIFY_ASSET_FROM_OM"
     AGENT_CLASSIFY = "AGENT_CLASSIFY"
     CREATE_OM_SUGGESTIONS = "CREATE_OM_SUGGESTIONS"
     APPLY_CONFIRMED_TAGS = "APPLY_CONFIRMED_TAGS"
 
-    # New two-flow Ranger architecture.
-    # Flow A is reconciled synchronously on backend startup from config/policies.yaml.
-    # Flow B is event-driven and only syncs Confirmed OM tags to Ranger's tag store.
+    # Policy desired state is stored in PostgreSQL and reconciled by the worker.
+    SYNC_RANGER_POLICIES = "SYNC_RANGER_POLICIES"
+
+    # Confirmed OpenMetadata tags are synchronized independently into Ranger's
+    # tag store. This does not create access policies.
     SYNC_RANGER_TAGS = "SYNC_RANGER_TAGS"
 
-    # Kept so already-queued v0.4 jobs remain claimable during a local/rolling upgrade.
-    # The handler now delegates to SYNC_RANGER_TAGS semantics.
+    # Kept so already-queued v0.4 jobs remain claimable during a local upgrade.
     RECONCILE_RANGER = "RECONCILE_RANGER"
 
     VERIFY_TRINO = "VERIFY_TRINO"

@@ -22,44 +22,45 @@ Accepted. `governance_jobs` coordinates API and Execution Worker. No broker unti
 
 ## ADR-006 — Separate machine identities
 
-Accepted. Agent Bot and Execution Bot are distinct; runtime automation never uses personal accounts.
+Accepted. Runtime automation never uses personal accounts.
 
 ## ADR-007 — Agent Worker is read-only toward OpenMetadata
 
-Accepted. MCP mutation tools are excluded; Agent output always requires native review.
+Accepted. Agent output requiring governance mutation must cross a controlled backend/OpenMetadata boundary.
 
-## ADR-008 — Ranger and Trino remain Execution Worker-only
+## ADR-008 — Ranger remains Execution Worker-only
 
-Accepted. Agent has no credentials or direct path.
+Accepted. AI/MCP-facing components have no Ranger credentials or direct Ranger mutation path.
 
 ## ADR-009 — Preserve Ranger ownership marker compatibility
 
-Accepted. Existing `managed-by=dg-backend` marker remains until a safe live-policy migration is designed.
+Accepted. Existing `managed-by=dg-backend` marker remains the mutation ownership guard.
 
 ## ADR-010 — Separate project directory for AI Agent (`governance_agent/`)
 
-Accepted. The AI Agent is decoupled from `governance_app` backend into a standalone project `governance_agent/`. The agent connects directly to OpenMetadata via MCP for discovery and REST for native Suggestions.
+Accepted. AI dependencies remain outside the core backend.
 
 ## ADR-011 — Separate ingestion, classification-read, and tag-mutation OpenMetadata credentials
 
-Accepted. The Execution Worker uses `OM_INGESTION_BOT_TOKEN` only for catalog
-discovery/ingest reads, `OM_AUTOCLASSIFICATION_BOT_TOKEN` only for classification
-metadata reads, and `OM_AUTO_TAG_BOT_TOKEN` for native Suggestion/tag mutation
-actions. `OPENMETADATA_EXECUTION_BOT_TOKEN` remains an input alias during
-migration, but new deployments use the three explicit variables.
+Accepted. Ingestion, classification reads, and tag mutation use separate Bot credentials.
 
 ## ADR-012 — Bot-only OpenMetadata Docker ingestion
 
-Accepted. Reuse the official `openmetadata/ingestion` image from the existing
-Docker lab through a small compose file in `governance_app/`. Its runner uses
-`OM_INGESTION_BOT_TOKEN` directly and has no admin JWT, admin PAT, or credential
-login fallback. The old full Docker stack is not copied into this repository.
+Accepted. The ingestion sidecar uses the ingestion Bot and no admin-login fallback.
 
 ## ADR-013 — Migrate reusable legacy platform assets without restoring legacy automation
 
-Accepted. Only the Docker lab and its bootstrap configuration from the legacy
-project are migrated under `platform/` and adapted to the current environment
-contracts. All legacy scripts and the legacy governance automation FastAPI
-application are excluded because they are not infrastructure and would duplicate
-or violate the current backend/agent, durable-job, native-review, and
-machine-identity boundaries.
+Accepted. Infrastructure assets may be reused; superseded automation is not restored.
+
+## ADR-014 — PostgreSQL desired-state Ranger policy catalog with native Ranger JSON
+
+Accepted.
+
+- `governance_policies` is the runtime source of truth for desired Ranger policies.
+- Imported documents use Ranger's native `RangerPolicy` JSON shape; the backend does not introduce a second policy DSL.
+- TAG and RESOURCE policy kinds are inferred/validated from configured service boundaries and resources.
+- `config/policies.yaml` is retained only as a one-time compatibility seed when the DB catalog is empty.
+- API/MCP/CLI write desired state; only the Execution Worker reconciles desired state to Ranger.
+- Policy removal is soft/explicit. Missing DB rows never authorize deletion of live Ranger policy state.
+- Existing unmanaged Ranger policies are not implicitly adopted or overwritten.
+- This boundary is intentionally tool-ready so a future Governance MCP server can call the same application services without obtaining Ranger credentials.

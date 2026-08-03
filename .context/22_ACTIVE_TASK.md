@@ -2,38 +2,43 @@
 
 ## Status
 
-Legacy platform migration is in progress as of 2026-07-31.
+Policy-control-plane refactor prepared on 2026-08-03.
 
 ## Change
 
-Migrate reusable Docker lab, metadata ingestion, Faker, DQ, and bootstrap assets from `old` into the current repository while refactoring them to the current backend/agent and Bot-identity boundaries.
+Reduce the active backend to two primary capabilities while keeping future MCP/AI integration clean:
 
-## Implemented
+1. deterministic classification/tagging against current OpenMetadata metadata;
+2. desired-state Ranger policy management and reconciliation.
 
-- decoupled Agent code into standalone project `governance_agent/`;
-- created `governance_agent` project structure (`pyproject.toml`, `README.md`, `app/`, `tests/`);
-- connected `governance_agent` directly to OpenMetadata via MCP client & REST Suggestion API;
-- removed in-tree `app/agent` module and `agent_worker.py` from `governance_app/`;
-- updated `governance_app` pyproject.toml and Makefile;
-- recorded ADR-010 in `20_DECISIONS.md`;
-- updated documentation (`AGENTS.md`, `.context/00_START_HERE.md`, `.context/08_ARCHITECTURE.md`, `.context/20_DECISIONS.md`);
-- verified both test suites (32 tests in `governance_app`, 3 tests in `governance_agent`) pass cleanly.
-- routed catalog discovery through `OM_INGESTION_BOT_TOKEN`;
-- routed classification/sample metadata reads through `OM_AUTOCLASSIFICATION_BOT_TOKEN`;
-- routed native Suggestions, trusted tag writes, and read-back through `OM_AUTO_TAG_BOT_TOKEN`;
-- retained `OPENMETADATA_EXECUTION_BOT_TOKEN` as a migration alias and added three-Bot configuration tests;
-- recorded ADR-011 and updated credential/security contracts.
-- verified 36 `governance_app` unit/contract tests pass in the `dg_backend` environment.
-- added a standalone Docker metadata-ingestion sidecar reusing the existing lab network and official OpenMetadata ingestion image;
-- removed the legacy admin-token/admin-login fallback from the migrated ingestion runner and recorded ADR-012.
-- replaced the live `metadata-ingestion` container; it is healthy and its first Bot-token ingestion completed with 0 errors.
-- inventoried the legacy project and recorded retained versus superseded capabilities in `platform/LEGACY_MIGRATION.md` and ADR-013.
-- migrated the Docker infrastructure into `platform/docker-compose.yml` and `platform/docker/`; the current FastAPI backend and legacy scripts remain separate.
+## Prepared implementation
 
-## Validation pending in live environment
+- add PostgreSQL `governance_policies` desired-state catalog;
+- persist native Ranger policy JSON in JSON/JSONB instead of a custom policy DSL;
+- infer/validate TAG vs RESOURCE policy from configured Ranger services/resources;
+- accept native Ranger JSON through `POST /api/v1/policies/import`;
+- list/get/soft-disable desired policies through the control API;
+- enqueue `SYNC_RANGER_POLICIES` through `POST /api/v1/policies/sync`;
+- reconcile DB policies to both `RANGER_TAG_SERVICE_NAME` and `RANGER_RESOURCE_SERVICE_NAME` in the Execution Worker;
+- preserve `managed-by=dg-backend` ownership protection and dry-run default;
+- seed the legacy YAML tag-policy catalog only when the DB catalog is empty;
+- replace direct Ranger mutation in FastAPI startup with a durable policy-sync job;
+- add `POST /api/v1/classifications/run`; caller supplies only target identity and the worker reads current OpenMetadata metadata before classification;
+- keep confirmed OpenMetadata tag assignment sync separate from access-policy reconciliation;
+- record ADR-014.
 
-- actual OpenMetadata Bot permissions;
-- live ingest/discovery read using `OM_INGESTION_BOT_TOKEN`, classification read using `OM_AUTOCLASSIFICATION_BOT_TOKEN`, and tag mutation/read-back using `OM_AUTO_TAG_BOT_TOKEN`;
-- live OpenMetadata webhook payload event subscription;
-- live Ranger policy API endpoint behavior;
-- live Trino query execution & policy propagation.
+## Deliberately retained during incremental migration
+
+- legacy YAML resolver/service class for compatibility tests and one-time seed;
+- existing Trino verification modules/job type, but they are outside the new core policy/classification flow and can be removed in a follow-up cleanup after the new slice is validated;
+- existing event ingestion routes for OpenMetadata webhook compatibility.
+
+## Validation required after applying the patch
+
+- run `alembic upgrade head`;
+- run the full `governance_app` test suite in `conda activate dg_backend`;
+- import the two Ranger-export examples (one `dev_tag`, one `dev_trino`) and confirm DB revisions/idempotent re-import;
+- run policy sync first with `RANGER_DRY_RUN=true`;
+- verify an unmanaged same-name Ranger policy is rejected rather than overwritten;
+- then test `RANGER_DRY_RUN=false` against the local Ranger lab;
+- trigger manual classification against a known OpenMetadata table and confirm the worker hydrates metadata from OM before applying classification rules.

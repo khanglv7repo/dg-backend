@@ -1,15 +1,13 @@
+from pathlib import Path
 from unittest.mock import MagicMock
 
-import pytest
-
-from app.clients.ranger import RangerClient
 from app.core.config import Settings
 from app.models.data_value_scan import DataValueScanRun
-from app.models.enums import JobType, ReconciliationAction
+from app.models.enums import JobType
 from app.repositories.jobs import JobRepository
 from app.rules.value_detectors import DataValueDetectorEngine
 from app.services.data_value_scanner import DataValueScannerService
-from app.services.policy_sync import PolicySyncService
+from app.services.policy_catalog import PolicyCatalogService
 
 
 def test_data_value_detector_engine_matching(tmp_path) -> None:
@@ -80,61 +78,77 @@ detectors:
     assert res["status"] == "COMPLETED"
     assert res["suggestions_created"] == 1
 
-    # Verify scan run in database
     scan_run = session.query(DataValueScanRun).first()
     assert scan_run is not None
     assert scan_run.total_samples == 2
     assert scan_run.matched_samples == 2
 
-    # Assert raw values ("secret_user1@sensitive-domain.com") are NOT stored in metrics
     metrics_str = str(scan_run.metrics)
     assert "secret_user1" not in metrics_str
     assert "sensitive-domain" not in metrics_str
 
-    # Assert enqueued job is CREATE_OM_SUGGESTIONS (never auto-apply)
     claimed = JobRepository(session).claim_batch(worker_id="test", limit=10)
     assert len(claimed) == 1
     assert claimed[0].job_type == JobType.CREATE_OM_SUGGESTIONS.value
 
 
-def test_ranger_tag_removal_reconciliation_disable(session) -> None:
+def test_policy_removal_is_explicit_db_disable(session) -> None:
+    """New architecture: tag removal never generates/removes Ranger policies.
+
+    Policy lifecycle is explicit desired state in PostgreSQL. A delete command is
+    a soft-disable that the Ranger catalog reconciler later applies.
+    """
+
     settings = Settings(
-        ranger_enabled=True,
-        ranger_dry_run=False,
-        ranger_allow_policy_delete=False,
+        _env_file=None,
+        ranger_service_name="dev_trino",
+        ranger_tag_service_name="dev_tag",
     )
-
-    mock_ranger = MagicMock(spec=RangerClient)
-    mock_ranger.dry_run = False
-
-    # Simulate existing policy for removed tag PII.Email
-    existing_policy = {
-        "id": 101,
-        "name": "dg-pii-email-hive.sales.customers-email",
-        "description": "PII Email | managed-by=dg-backend;",
+    document = {
         "isEnabled": True,
-    }
-    mock_ranger.find_by_name.return_value = existing_policy
-    mock_ranger.reconcile_removal.return_value = {
-        "action": ReconciliationAction.DISABLE.value,
-        "desired_hash": "disabled-hash",
-        "observed_hash": "old-hash",
-        "policy_id": "101",
-        "document": {**existing_policy, "isEnabled": False},
+        "service": "dev_tag",
+        "serviceType": "tag",
+        "name": "dg-tag-pii-email",
+        "description": "Allow PII readers to select PII.Email",
+        "resources": {
+            "tag": {
+                "values": ["PII.Email"],
+                "isExcludes": False,
+                "isRecursive": False,
+            }
+        },
+        "policyItems": [
+            {
+                "accesses": [
+                    {"type": "trino:select", "isAllowed": True}
+                ],
+                "groups": ["pii_readers"],
+                "delegateAdmin": False,
+            }
+        ],
     }
 
-    service = PolicySyncService(session, settings, mock_ranger)
-
-    # Sync with EMPTY tags (tag was removed)
+    service = PolicyCatalogService(session, settings)
     with session.begin():
-        res = service.sync(
-            entity_fqn="hive.sales.customers",
-            tags=[],
-            field_paths={},
-            classification_run_id=None,
+        policy, created, changed = service.import_document(
+            document,
+            actor_id="test",
+            actor_name="Test",
+        )
+
+    assert created is True
+    assert changed is True
+    assert policy.enabled is True
+    assert policy.revision == 1
+
+    with session.begin():
+        disabled = service.disable(
+            policy.id,
+            actor_id="test",
+            actor_name="Test",
             correlation_id="corr-removal-1",
         )
 
-    assert len(res["reconciliations"]) >= 1
-    actions = [r["action"] for r in res["reconciliations"]]
-    assert ReconciliationAction.DISABLE.value in actions
+    assert disabled.enabled is False
+    assert disabled.document["isEnabled"] is False
+    assert disabled.revision == 2

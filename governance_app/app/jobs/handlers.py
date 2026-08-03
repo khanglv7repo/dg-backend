@@ -3,6 +3,7 @@ from __future__ import annotations
 from sqlalchemy.orm import Session
 
 from app.clients.openmetadata import OpenMetadataClient
+from app.clients.ranger import RangerClient
 from app.clients.ranger_tags import RangerTagStoreClient
 from app.clients.trino import TrinoDBAPIExecutor
 from app.core.config import Settings
@@ -11,12 +12,16 @@ from app.models.enums import JobType
 from app.schemas.events import MetadataEventRequest
 from app.services.asset_discovery import AssetDiscoveryService
 from app.services.classification import ClassificationService
+from app.services.classification_commands import OpenMetadataClassificationRunner
 from app.services.data_value_scanner import DataValueScannerService
 from app.services.openmetadata_governance import (
     ConfirmedTagApplicationService,
     OpenMetadataSuggestionService,
 )
-from app.services.policy_sync import RangerTagAssignmentService
+from app.services.policy_sync import (
+    RangerPolicyCatalogSyncService,
+    RangerTagAssignmentService,
+)
 from app.services.verification import VerificationService
 
 
@@ -44,6 +49,22 @@ def handle_classify(
     return ClassificationService(session, settings).classify(
         MetadataEventRequest.model_validate(payload)
     )
+
+
+def handle_classify_from_openmetadata(
+    session: Session,
+    settings: Settings,
+    payload: dict,
+) -> dict:
+    client = _autoclassification_openmetadata_client(settings)
+    try:
+        return OpenMetadataClassificationRunner(
+            session,
+            settings,
+            client,
+        ).run(payload)
+    finally:
+        client.close()
 
 
 def handle_create_om_suggestions(
@@ -83,6 +104,39 @@ def handle_apply_confirmed_tags(
         field_tags=dict(payload.get("field_tags", {})),
         correlation_id=payload.get("correlation_id"),
     )
+
+
+def handle_sync_ranger_policies(
+    session: Session,
+    settings: Settings,
+    payload: dict,
+) -> dict:
+    if not settings.ranger_enabled:
+        raise ConfigurationError("Ranger integration is disabled")
+
+    services = {
+        settings.ranger_tag_service_name,
+        settings.ranger_service_name,
+    }
+    clients = {
+        service: _ranger_policy_client(settings, service)
+        for service in services
+    }
+    tag_store = _ranger_tag_store_client(settings)
+    try:
+        return RangerPolicyCatalogSyncService(
+            session,
+            settings,
+            clients,
+            tag_store,
+        ).sync(
+            policy_ids=[str(value) for value in payload.get("policy_ids", [])],
+            correlation_id=payload.get("correlation_id"),
+        )
+    finally:
+        tag_store.close()
+        for client in clients.values():
+            client.close()
 
 
 def handle_sync_ranger_tags(
@@ -232,6 +286,21 @@ def _auto_tag_openmetadata_client(
     )
 
 
+def _ranger_policy_client(settings: Settings, service_name: str) -> RangerClient:
+    return RangerClient(
+        base_url=settings.ranger_base_url,
+        username=settings.ranger_service_account,
+        password=(
+            settings.ranger_service_secret.get_secret_value()
+            if settings.ranger_service_secret
+            else None
+        ),
+        service_name=service_name,
+        dry_run=settings.ranger_dry_run,
+        timeout=settings.ranger_timeout_seconds,
+    )
+
+
 def _ranger_tag_store_client(
     settings: Settings,
 ) -> RangerTagStoreClient:
@@ -251,8 +320,10 @@ def _ranger_tag_store_client(
 
 HANDLERS = {
     JobType.CLASSIFY_ASSET: handle_classify,
+    JobType.CLASSIFY_ASSET_FROM_OM: handle_classify_from_openmetadata,
     JobType.CREATE_OM_SUGGESTIONS: handle_create_om_suggestions,
     JobType.APPLY_CONFIRMED_TAGS: handle_apply_confirmed_tags,
+    JobType.SYNC_RANGER_POLICIES: handle_sync_ranger_policies,
     JobType.SYNC_RANGER_TAGS: handle_sync_ranger_tags,
     JobType.RECONCILE_RANGER: handle_reconcile_ranger,
     JobType.VERIFY_TRINO: handle_verify_trino,

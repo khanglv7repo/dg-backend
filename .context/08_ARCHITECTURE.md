@@ -3,49 +3,53 @@
 ## Context diagram
 
 ```text
-+-----------------------------------------------------------------------+
-| OpenMetadata                                                          |
-| assets, tags, Suggestions, reviewers, history, Apps, MCP              |
-+-------------------+-------------------------------+-------------------+
-                    | REST / events                 | MCP / REST
-                    v                               v
-+------------------------------------+   +------------------------------+
-| Governance Backend                 |   | Governance Agent             |
-| (governance_app/)                  |   | (governance_agent/)          |
-|                                    |   |                              |
-| FastAPI Control API                |   | LangGraph Agent + LLM        |
-| PostgreSQL governance_jobs         |   | OpenMetadata MCP read Bot    |
-| Execution Worker (Ranger / Trino)  |   | Directly creates Suggestions |
-+-------------------+----------------+   +--------------+---------------+
-                    |                                   |
-                    v                                   v
-              Apache Ranger                        LLM Provider
-                    |
-                    v
-                  Trino
+                    Human / CLI / future AI + MCP
+                               |
+                               v
++------------------------------------------------------------------+
+| Governance Backend                                               |
+|                                                                  |
+| FastAPI Control API                                              |
+|   - POST /classifications/run                                    |
+|   - POST /policies/import                                        |
+|   - POST /policies/sync                                          |
+|                                                                  |
+| PostgreSQL                                                       |
+|   - governance_jobs       durable execution queue                |
+|   - governance_policies   Ranger desired-state catalog           |
+|                                                                  |
+| Execution Worker                                                 |
+|   - hydrate metadata from OpenMetadata                           |
+|   - deterministic classification / controlled tag write          |
+|   - Ranger policy reconciliation                                 |
+|   - confirmed-tag assignment synchronization                     |
++---------------------------+----------------------+---------------+
+                            |                      |
+                            v                      v
+                     OpenMetadata             Apache Ranger
+                  metadata + tag truth       enforcement target
 ```
 
-## Application architecture
+## Application boundaries
 
-The repository is structured into two separate project directories:
+The backend exposes two primary business capabilities:
 
-1. **`governance_app/` (Backend Control & Execution)**
-   - **Controller**: FastAPI route functions under `app/api/routes`.
-   - **Model**: SQLAlchemy models and Pydantic schemas.
-   - **Service**: Business rules, deterministic classification, policy sync, verification.
-   - **Repository**: SQLAlchemy persistence for jobs & audit runs.
-   - **Execution Worker**: ranger reconciliation & Trino verification.
+1. **Classification**
+   - target identity enters through REST/automation;
+   - Execution Worker reads the current asset from OpenMetadata;
+   - `classification_rules.yaml` drives deterministic exact/regex matching;
+   - trusted matches may apply tags to OpenMetadata under the existing feature flag;
+   - confirmed tags may be synchronized to Ranger's tag store as a technical integration concern.
 
-2. **`governance_agent/` (Standalone AI Agent Project)**
-   - Standalone project directory with its own `pyproject.toml`.
-   - **MCP Client**: Read-only OpenMetadata MCP connection.
-   - **LangGraph**: Classification node graph for metadata sensitivity.
-   - **OpenMetadata Client**: Creates native Suggestions directly in OpenMetadata using Agent Bot token.
+2. **Policy management and reconciliation**
+   - native Ranger JSON is imported into PostgreSQL;
+   - `governance_policies` is desired state;
+   - API/MCP/CLI can create or update desired state without Ranger credentials;
+   - `SYNC_RANGER_POLICIES` performs DB -> Ranger reconciliation in the Execution Worker;
+   - TAG and RESOURCE policies share the same native document persistence and reconciler, but target different configured Ranger services.
 
-## Project Separation Rationale
+## Future MCP boundary
 
-Agent and Execution are decoupled into separate project directories to ensure:
-- Clear separation of concerns and dependency isolation (LLM & LangGraph dependencies stay in `governance_agent`);
-- Independent deployment, scaling, and execution life-cycles;
-- Direct connection from Agent to OpenMetadata without cluttering the core backend;
-- Strict security credential isolation (Agent Bot token vs Execution Bot token).
+A Governance MCP server should remain a thin adapter over the same application services used by REST. It may expose tools such as policy import/list/disable/sync and classification run. It must not reimplement Ranger/OpenMetadata clients and must not receive Ranger credentials.
+
+OpenMetadata's own MCP remains the preferred metadata discovery interface for AI agents. The Governance MCP exists for backend-owned commands and desired-state management.

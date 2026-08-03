@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 from app.core.config import Settings
 from app.models.enums import JobType
 from app.schemas.events import ConfirmedTagEventRequest
@@ -9,10 +7,7 @@ from app.services.intake import IntakeService
 
 
 def test_confirmed_tag_intake_queues_live_openmetadata_refresh(session) -> None:
-    settings = Settings(
-        _env_file=None,
-        policy_mappings_path=Path("config/policies.yaml"),
-    )
+    settings = Settings(_env_file=None)
     request = ConfirmedTagEventRequest(
         event_id="evt-confirmed",
         source="SUGGESTION_ACCEPTED",
@@ -26,11 +21,10 @@ def test_confirmed_tag_intake_queues_live_openmetadata_refresh(session) -> None:
     with session.begin():
         job = IntakeService(session, settings).accept_confirmed_tag_event(request)
 
-    assert job.job_type == JobType.RECONCILE_RANGER.value
+    assert job.job_type == JobType.SYNC_RANGER_TAGS.value
     assert job.payload == {
         "entity_type": "table",
         "entity_fqn": "hive.sales.customers",
-        "refresh_confirmed_tags": True,
         "classification_run_id": None,
         "correlation_id": "corr",
     }
