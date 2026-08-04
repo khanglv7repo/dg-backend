@@ -2,7 +2,14 @@
 
 ## Status
 
-DB-backed Ranger policy control plane is active. Cleanup/hardening is the current task as of 2026-08-03.
+DB-backed Ranger policy control plane is active. Cleanup/hardening remains active as of 2026-08-03. OpenMetadata native Suggestion reliability hardening was completed on 2026-08-05.
+
+## Completed OpenMetadata Suggestion reliability hardening
+
+- Validate every candidate OpenMetadata tag FQN before a native Suggestion batch can write, so incomplete taxonomy cannot create a partial batch.
+- Read the target entity once and skip tags already present on the same entity or column as `Suggested` or `Confirmed`.
+- Preserve OpenMetadata 404 response details in backend errors.
+- Regression coverage: focused client/service tests passed (`9 passed`).
 
 ## Validated before cleanup
 

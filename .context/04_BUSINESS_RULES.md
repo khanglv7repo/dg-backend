@@ -14,6 +14,10 @@ BR-005. Untrusted/uncertain classifications use native OpenMetadata Suggestions.
 
 BR-006. OpenMetadata remains the source of truth for metadata and confirmed tags.
 
+BR-007. Before creating native Suggestions, the worker validates every candidate tag FQN against OpenMetadata; a missing taxonomy tag fails the entire batch before any Suggestion write.
+
+BR-008. Before creating a native Suggestion, the worker reads the live entity once and skips a tag already present on the same entity or column with `Suggested` or `Confirmed` state.
+
 ## Ranger policy catalog
 
 BR-020. PostgreSQL `governance_policies` is the only runtime desired-state source for Ranger policies.

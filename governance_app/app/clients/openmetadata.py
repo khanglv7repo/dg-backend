@@ -5,7 +5,7 @@ from urllib.parse import quote
 
 import httpx
 
-from app.core.errors import ExternalSystemError, NotFoundError
+from app.core.errors import ExternalSystemError, NotFoundError, ValidationError
 
 
 class OpenMetadataClient:
@@ -83,18 +83,98 @@ class OpenMetadataClient:
             raise NotFoundError(f"OpenMetadata entity {entity_type}:{fqn} was not found")
         return response
 
-    def get_column(
-        self,
-        *,
-        column_fqn: str,
-        entity_type: str = "table",
-        fields: str = "tags",
-    ) -> dict:
-        encoded = quote(column_fqn, safe="")
+    def get_tag(self, tag_fqn: str) -> dict:
+        """Return the taxonomy tag identified by its OpenMetadata FQN."""
         return self._request(
             "GET",
-            f"/v1/columns/name/{encoded}",
-            params={"entityType": entity_type, "fields": fields},
+            f"/v1/tags/name/{quote(tag_fqn, safe='')}",
+        )
+
+    def tag_exists(self, tag_fqn: str) -> bool:
+        try:
+            self.get_tag(tag_fqn)
+        except NotFoundError:
+            return False
+        return True
+
+    def validate_tag_fqns(self, tag_fqns: list[str]) -> None:
+        """Fail a suggestion batch before any write when taxonomy is incomplete."""
+        missing = [
+            tag_fqn
+            for tag_fqn in sorted({tag.strip() for tag in tag_fqns if tag.strip()})
+            if not self.tag_exists(tag_fqn)
+        ]
+        if missing:
+            raise ValidationError(
+                "Missing OpenMetadata tags:\n"
+                + "\n".join(f"- {tag_fqn}" for tag_fqn in missing)
+            )
+
+    def get_suggested_or_confirmed_tag_snapshot(
+        self,
+        *,
+        entity_type: str,
+        entity_fqn: str,
+    ) -> dict[str, Any]:
+        """Read live tags once for duplicate-free native Suggestions."""
+        entity = self.get_entity(
+            entity_type=entity_type,
+            fqn=entity_fqn,
+            fields="tags,columns",
+        )
+        field_tags: dict[str, list[str]] = {}
+        for column in entity.get("columns", []) or []:
+            if not isinstance(column, dict):
+                continue
+            column_name = str(column.get("name") or "").strip()
+            if not column_name:
+                continue
+            tags = self._suggested_or_confirmed_tag_fqns(column.get("tags", []))
+            if tags:
+                field_tags[f"columns.{column_name}"] = tags
+        return {
+            "entity_tags": self._suggested_or_confirmed_tag_fqns(
+                entity.get("tags", [])
+            ),
+            "field_tags": field_tags,
+        }
+
+    def get_column(
+    self,
+    *,
+    column_fqn: str,
+    entity_type: str = "table",
+    fields: str = "tags",
+    ) -> dict:
+        if entity_type != "table":
+            raise NotFoundError(
+                f"Column lookup is only supported for table entities: {column_fqn}"
+            )
+
+        table_fqn, separator, column_name = column_fqn.rpartition(".")
+        if not separator or not table_fqn or not column_name:
+            raise NotFoundError(
+                f"Invalid OpenMetadata column FQN: {column_fqn}"
+            )
+
+        table = self.get_entity(
+            entity_type="table",
+            fqn=table_fqn,
+            fields="columns",
+        )
+
+        for column in table.get("columns", []) or []:
+            if not isinstance(column, dict):
+                continue
+
+            if (
+                column.get("fullyQualifiedName") == column_fqn
+                or column.get("name") == column_name
+            ):
+                return column
+
+        raise NotFoundError(
+            f"OpenMetadata column not found: {column_fqn}"
         )
 
     def get_confirmed_tag_snapshot(
@@ -298,6 +378,18 @@ class OpenMetadataClient:
                 confirmed.add(tag_fqn)
         return sorted(confirmed)
 
+    @staticmethod
+    def _suggested_or_confirmed_tag_fqns(labels: Any) -> list[str]:
+        current: set[str] = set()
+        for item in labels or []:
+            if not isinstance(item, dict):
+                continue
+            tag_fqn = str(item.get("tagFQN") or "").strip()
+            state = str(item.get("state") or "Confirmed").lower()
+            if tag_fqn and state in {"suggested", "confirmed"}:
+                current.add(tag_fqn)
+        return sorted(current)
+
     def _merge_entity_tags(
         self,
         *,
@@ -338,32 +430,99 @@ class OpenMetadataClient:
         )
 
     def _merge_column_tags(
-        self,
-        *,
-        column_fqn: str,
-        entity_type: str,
-        tags: list[str],
-        label_type: str,
+    self,
+    *,
+    column_fqn: str,
+    entity_type: str,
+    tags: list[str],
+    label_type: str,
     ) -> dict:
-        column = self.get_column(
-            column_fqn=column_fqn,
-            entity_type=entity_type,
-            fields="tags",
+        if entity_type != "table":
+            raise NotFoundError(
+                f"Column tags are only supported for table entities: {column_fqn}"
+            )
+
+        table_fqn, separator, column_name = column_fqn.rpartition(".")
+        if not separator:
+            raise NotFoundError(
+                f"Invalid OpenMetadata column FQN: {column_fqn}"
+            )
+
+        table = self.get_entity(
+            entity_type="table",
+            fqn=table_fqn,
+            fields="columns",
         )
+
+        table_id = table.get("id")
+        if not table_id:
+            raise ExternalSystemError(
+                "OpenMetadata table response did not contain id",
+                system="openmetadata",
+                retryable=False,
+            )
+
+        columns = table.get("columns", []) or []
+
+        column_index = None
+        column = None
+
+        for index, item in enumerate(columns):
+            if not isinstance(item, dict):
+                continue
+
+            if (
+                item.get("fullyQualifiedName") == column_fqn
+                or item.get("name") == column_name
+            ):
+                column_index = index
+                column = item
+                break
+
+        if column is None or column_index is None:
+            raise NotFoundError(
+                f"OpenMetadata column not found: {column_fqn}"
+            )
+
         current = list(column.get("tags", []) or [])
-        existing = {item.get("tagFQN") for item in current if item.get("tagFQN")}
+        existing = {
+            item.get("tagFQN")
+            for item in current
+            if isinstance(item, dict) and item.get("tagFQN")
+        }
+
         additions = [
-            self.tag_label(tag, label_type=label_type, state="Confirmed")
+            self.tag_label(
+                tag,
+                label_type=label_type,
+                state="Confirmed",
+            )
             for tag in sorted(set(tags) - existing)
         ]
+
         if additions:
-            encoded = quote(column_fqn, safe="")
+            patch = [
+                {
+                    "op": (
+                        "replace"
+                        if "tags" in column
+                        else "add"
+                    ),
+                    "path": f"/columns/{column_index}/tags",
+                    "value": current + additions,
+                }
+            ]
+
             self._request(
-                "PUT",
-                f"/v1/columns/name/{encoded}",
-                params={"entityType": entity_type},
-                json={"tags": current + additions},
+                "PATCH",
+                f"/v1/tables/name/{quote(table_fqn, safe='')}",
+                json=patch,
+                headers={
+                    "Content-Type":
+                        "application/json-patch+json"
+                },
             )
+
         return self.get_column(
             column_fqn=column_fqn,
             entity_type=entity_type,
@@ -387,6 +546,22 @@ class OpenMetadataClient:
             ) from exc
 
         if response.status_code == 404:
+            detail = response.text.strip()
+            if detail:
+                try:
+                    body = response.json()
+                except ValueError:
+                    body = None
+                if isinstance(body, dict):
+                    detail = str(
+                        body.get("message")
+                        or body.get("error")
+                        or body.get("detail")
+                        or detail
+                    )
+                raise NotFoundError(
+                    f"OpenMetadata returned 404 for {path}: {detail[:500]}"
+                )
             raise NotFoundError(f"OpenMetadata resource not found: {path}")
         if response.is_error:
             retryable = response.status_code == 429 or response.status_code >= 500

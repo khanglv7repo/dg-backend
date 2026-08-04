@@ -30,6 +30,7 @@ Only governance operator/admin API actors can retry `DEAD` or `CANCELLED` jobs a
 ## Fail-safe examples
 
 - Unknown Agent tag: reject; no Suggestion.
+- Missing OpenMetadata taxonomy tag: fail the complete Suggestion batch before any write and list every missing FQN.
 - Ranger policy not owned: do not overwrite.
 - OpenMetadata read-back missing confirmed tag: fail the job.
 - MCP mutation tool request: reject locally.

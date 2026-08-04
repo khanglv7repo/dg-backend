@@ -42,6 +42,14 @@ class OpenMetadataSuggestionService:
         for item in suggestions:
             grouped.setdefault(item.get("field_path"), []).append(item)
 
+        self.client.validate_tag_fqns(
+            [str(item["tag"]) for item in suggestions]
+        )
+        current_tags = self.client.get_suggested_or_confirmed_tag_snapshot(
+            entity_type=entity_type,
+            entity_fqn=entity_fqn,
+        )
+
         label_type = (
             "Generated"
             if source_kind == ClassificationSource.AGENT.value
@@ -53,6 +61,11 @@ class OpenMetadataSuggestionService:
             key=lambda pair: pair[0] or "",
         ):
             tags = sorted({str(item["tag"]) for item in items})
+            existing_tags = set(
+                current_tags["entity_tags"]
+                if field_path is None
+                else current_tags["field_tags"].get(field_path, [])
+            )
             evidence = "; ".join(
                 f"{item.get('tag')}: "
                 f"{item.get('rationale', 'classification evidence')}"
@@ -70,11 +83,14 @@ class OpenMetadataSuggestionService:
                 marker=marker,
             )
             if response is None:
+                tags_to_create = sorted(set(tags) - existing_tags)
+                if not tags_to_create:
+                    continue
                 response = self.client.create_tag_suggestion(
                     entity_type=entity_type,
                     entity_fqn=entity_fqn,
                     field_path=field_path,
-                    tags=tags,
+                    tags=tags_to_create,
                     description=(
                         f"{marker} {source_kind} classification proposal "
                         f"({source_version}). {evidence}"

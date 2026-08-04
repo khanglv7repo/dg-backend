@@ -57,7 +57,7 @@ dmypy.json
 .pytype/
 .ruff_cache/
 .cache/
-
+*.bak
 # Environment files / secrets
 .env
 .env.*

@@ -19,6 +19,15 @@
 | >0 | Yes | Enqueue `CREATE_OM_SUGGESTIONS` |
 | >0 | No | Configuration failure; do not create Suggestion |
 
+## Native OpenMetadata Suggestion creation
+
+| Candidate tag taxonomy | Live entity/column tag state | Existing DG marker | Action |
+|---|---|---|---|
+| Any candidate missing | Any | Any | Fail the complete batch before any write, listing missing tag FQNs |
+| All exist | Same tag is `Suggested` or `Confirmed` | None | Skip that tag |
+| All exist | Tag not currently present | Matching open marker | Reuse existing native Suggestion |
+| All exist | Tag not currently present | None | Create native OpenMetadata Suggestion |
+
 ## Ranger reconciliation
 
 | Existing owned policy | Desired equals observed | Dry-run | Action |
