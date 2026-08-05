@@ -13,6 +13,14 @@ enforcement               -> Apache Ranger
 
 `config/policies.yaml` is no longer a runtime policy source and is removed by the v0.6.1 cleanup.
 
+## Configuration paths
+
+Runtime connection locations are configured in `.env`, including `DATABASE_URL`.
+The OpenMetadata taxonomy bootstrap requires `OM_TAXONOMY_FILE`; a relative
+value is resolved from the directory containing `.env`. To use a different
+environment file, set the process environment variable `ENVIRONMENT_FILE_PATH`
+to its path before running the bootstrap script.
+
 ## Policy workflow
 
 ```text

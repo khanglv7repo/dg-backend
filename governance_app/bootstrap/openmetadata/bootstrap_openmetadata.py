@@ -8,14 +8,9 @@ from urllib.parse import quote
 import httpx
 import yaml
 
-
-DEFAULT_CONFIG = Path(__file__).with_name("phase1_taxonomy.yaml")
-
-SCRIPT_PATH = Path(__file__).resolve()
-ENV_CANDIDATES = [
-    SCRIPT_PATH.parents[2] / ".env",  # backend/governance_app/.env
-    SCRIPT_PATH.parents[3] / ".env",  # backend/.env fallback
-]
+ENVIRONMENT_FILE_PATH_VARIABLE = "ENVIRONMENT_FILE_PATH"
+TAXONOMY_CONFIGURATION_PATH_VARIABLE = "OM_TAXONOMY_FILE"
+DEFAULT_ENVIRONMENT_FILE_PATH = Path(".env")
 
 
 def load_env_file(path: Path) -> None:
@@ -32,11 +27,7 @@ def load_env_file(path: Path) -> None:
         if not key:
             continue
 
-        if (
-            len(value) >= 2
-            and value[0] == value[-1]
-            and value[0] in {"'", '"'}
-        ):
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
             value = value[1:-1]
 
         os.environ.setdefault(key, value)
@@ -47,6 +38,26 @@ def required_env(name: str) -> str:
     if not value:
         raise RuntimeError(f"Missing required environment variable: {name}")
     return value
+
+
+def configured_environment_file_path() -> Path:
+    return (
+        Path(
+            os.getenv(
+                ENVIRONMENT_FILE_PATH_VARIABLE,
+                str(DEFAULT_ENVIRONMENT_FILE_PATH),
+            )
+        )
+        .expanduser()
+        .resolve()
+    )
+
+
+def configured_taxonomy_path(environment_file_path: Path) -> Path:
+    configured_path = Path(required_env(TAXONOMY_CONFIGURATION_PATH_VARIABLE)).expanduser()
+    if not configured_path.is_absolute():
+        configured_path = environment_file_path.parent / configured_path
+    return configured_path.resolve()
 
 
 class OpenMetadataBootstrap:
@@ -121,8 +132,7 @@ class OpenMetadataBootstrap:
         response = self.request("POST", "/v1/tags", json=payload)
         if response.status_code not in (200, 201):
             raise RuntimeError(
-                f"Could not create tag {fqn}: "
-                f"HTTP {response.status_code}: {response.text[:1000]}"
+                f"Could not create tag {fqn}: HTTP {response.status_code}: {response.text[:1000]}"
             )
         print(f"[create] tag: {fqn}")
 
@@ -138,19 +148,14 @@ class OpenMetadataBootstrap:
 
 
 def main() -> int:
-    env_path = next((path for path in ENV_CANDIDATES if path.exists()), None)
-    if env_path is None:
-        raise RuntimeError(
-            "No .env file found. Checked: "
-            + ", ".join(str(path) for path in ENV_CANDIDATES)
-        )
+    env_path = configured_environment_file_path()
+    if not env_path.exists():
+        raise RuntimeError(f"Environment file not found: {env_path}")
 
     load_env_file(env_path)
     print(f"[env] loaded: {env_path}")
 
-    config_path = Path(
-        os.getenv("OM_TAXONOMY_FILE", str(DEFAULT_CONFIG))
-    ).expanduser().resolve()
+    config_path = configured_taxonomy_path(env_path)
 
     base_url = os.getenv(
         "OPENMETADATA_BASE_URL",
@@ -159,14 +164,10 @@ def main() -> int:
 
     # Prefer the backend autoclassification bot token. Fall back to the
     # ingestion token only if that is how the local dev environment is wired.
-    token = (
-        os.getenv("OM_AUTOCLASSIFICATION_BOT_TOKEN")
-        or os.getenv("OM_INGESTION_BOT_TOKEN")
-    )
+    token = os.getenv("OM_AUTOCLASSIFICATION_BOT_TOKEN") or os.getenv("OM_INGESTION_BOT_TOKEN")
     if not token:
         raise RuntimeError(
-            "Missing OM_AUTOCLASSIFICATION_BOT_TOKEN "
-            "(or OM_INGESTION_BOT_TOKEN fallback)"
+            "Missing OM_AUTOCLASSIFICATION_BOT_TOKEN (or OM_INGESTION_BOT_TOKEN fallback)"
         )
 
     if not config_path.exists():

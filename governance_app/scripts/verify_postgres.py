@@ -1,13 +1,8 @@
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
 import os
-import time
 import threading
+import time
 import uuid
 from urllib.parse import urlparse
 
@@ -117,7 +112,9 @@ def main():
     print(f"   Overlapping jobs between Worker A and Worker B: {len(overlap)}")
 
     if overlap:
-        raise RuntimeError(f"CONCURRENCY FAILURE: Overlapping jobs claimed by both workers! {overlap}")
+        raise RuntimeError(
+            f"CONCURRENCY FAILURE: Overlapping jobs claimed by both workers! {overlap}"
+        )
 
     print("   [PASS] Concurrent claim verification succeeded. Zero overlapping claims.")
 
