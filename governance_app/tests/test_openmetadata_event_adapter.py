@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-from sqlalchemy import select
+from unittest.mock import patch
 
 from app.core.config import Settings
-from app.models.enums import JobType
-from app.models.job import GovernanceJob
+from app.services.event_router import EventPurpose
 from app.services.openmetadata_event_adapter import OpenMetadataEventAdapterService
 
 
@@ -44,23 +43,25 @@ def test_tag_change_enqueues_tag_sync_without_reclassification(session) -> None:
         },
     }
 
-    with session.begin():
-        created = OpenMetadataEventAdapterService(
-            session,
-            _settings(),
-        ).process_change_event(event)
+    with patch("app.services.openmetadata_event_adapter.sync_tags_to_ranger") as mock_tag_sync, \
+         patch("app.services.openmetadata_event_adapter.classify_entity") as mock_classify:
+        
+        mock_tag_sync.delay.return_value.id = "task-tag-sync-1"
 
-    jobs = list(session.scalars(select(GovernanceJob)))
+        with session.begin():
+            res = OpenMetadataEventAdapterService(
+                session,
+                _settings(),
+            ).process_change_event(event)
 
-    assert len(created) == 1
-    assert len(jobs) == 1
-    assert jobs[0].job_type == JobType.SYNC_RANGER_TAGS.value
-    assert jobs[0].payload == {
-        "entity_type": "table",
-        "entity_fqn": "hive.sales.customers",
-        "classification_run_id": None,
-        "correlation_id": "om-event-evt-confirm-email",
-    }
+        assert res["status"] == "accepted"
+        assert res["purposes"] == [EventPurpose.TAG_SYNC.value]
+        mock_tag_sync.delay.assert_called_once_with(
+            entity_type="table",
+            entity_fqn="hive.sales.customers",
+            correlation_id="om-event-evt-confirm-email",
+        )
+        mock_classify.delay.assert_not_called()
 
 
 def test_non_tag_metadata_update_still_enqueues_classification(session) -> None:
@@ -86,13 +87,15 @@ def test_non_tag_metadata_update_still_enqueues_classification(session) -> None:
         },
     }
 
-    with session.begin():
-        OpenMetadataEventAdapterService(
-            session,
-            _settings(),
-        ).process_change_event(event)
+    with patch("app.services.openmetadata_event_adapter.classify_entity") as mock_classify:
+        mock_classify.delay.return_value.id = "task-classify-1"
 
-    jobs = list(session.scalars(select(GovernanceJob)))
+        with session.begin():
+            res = OpenMetadataEventAdapterService(
+                session,
+                _settings(),
+            ).process_change_event(event)
 
-    assert len(jobs) == 1
-    assert jobs[0].job_type == JobType.CLASSIFY_ASSET.value
+        assert res["status"] == "accepted"
+        assert EventPurpose.CLASSIFY.value in res["purposes"]
+        mock_classify.delay.assert_called_once()

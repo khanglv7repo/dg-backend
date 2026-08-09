@@ -1,7 +1,14 @@
+"""Adapter for raw OpenMetadata ChangeEvent webhooks using EventInbox and EventPurposeRouter.
+
+Per R3 target flow:
+- Webhook is a trigger, NOT business truth.
+- Persists to event_inbox for idempotency & audit.
+- Evaluates EventPurposeRouter -> {CLASSIFY}, {TAG_SYNC}, both, or none.
+- Dispatches Celery tasks accordingly.
+- Tag-only changes route strictly to {TAG_SYNC} (prevents loops!).
+"""
 from __future__ import annotations
 
-import hashlib
-import json
 import logging
 from typing import Any
 
@@ -9,30 +16,21 @@ from sqlalchemy.orm import Session
 
 from app.core.config import Settings
 from app.core.errors import AuthorizationError
-from app.models.enums import JobType
 from app.repositories.audit import AuditRepository
-from app.repositories.jobs import JobRepository
-from app.schemas.events import MetadataEventRequest, MetadataField
+from app.repositories.event_inbox import EventInboxRepository
+from app.services.event_router import EventPurpose, EventPurposeRouter
+from app.tasks.classification import classify_entity
+from app.tasks.tag_sync import sync_tags_to_ranger
 
 logger = logging.getLogger(__name__)
 
 
 class OpenMetadataEventAdapterService:
-    """Adapter for raw OpenMetadata ChangeEvent webhooks.
-
-    Tag changes and classification are separate lifecycles:
-    - metadata changes may enqueue CLASSIFY_ASSET;
-    - tag lifecycle changes enqueue SYNC_RANGER_TAGS;
-    - the tag-sync worker reads current Confirmed state back from OpenMetadata.
-
-    No Ranger access policy is created here.
-    """
-
     def __init__(self, session: Session, settings: Settings) -> None:
         self.session = session
         self.settings = settings
         self.audit = AuditRepository(session)
-        self.jobs = JobRepository(session)
+        self.inbox = EventInboxRepository(session)
 
     def verify_webhook_token(self, token_or_header: str | None) -> None:
         if self.settings.openmetadata_webhook_secret:
@@ -42,10 +40,9 @@ class OpenMetadataEventAdapterService:
                     "Invalid OpenMetadata webhook authentication secret"
                 )
 
-    def process_change_event(self, event_data: dict[str, Any]) -> list[str]:
+    def process_change_event(self, event_data: dict[str, Any]) -> dict[str, Any]:
         event_id = str(event_data.get("id") or event_data.get("eventId") or "")
         event_type = str(event_data.get("eventType") or "")
-        event_type_upper = event_type.upper()
         entity_type = str(event_data.get("entityType") or "table")
         entity_fqn = str(
             event_data.get("entityFullyQualifiedName")
@@ -57,169 +54,90 @@ class OpenMetadataEventAdapterService:
         correlation_id = f"om-event-{event_id}" if event_id else None
 
         if not entity_fqn:
-            logger.info(
-                "Ignoring OpenMetadata event with missing entityFullyQualifiedName"
-            )
-            return []
+            logger.info("Ignoring OpenMetadata event with missing entityFullyQualifiedName")
+            return {"status": "ignored", "reason": "missing_entity_fqn"}
 
-        created_jobs: list[str] = []
-        change_desc = event_data.get("changeDescription") or {}
-        tag_changed = self._has_tag_change(change_desc)
+        if not event_id:
+            event_id = f"evt-{timestamp}-{hash(entity_fqn)}"
 
-        if tag_changed:
-            logical = json.dumps(
-                {
-                    "event_id": event_id or f"timestamp:{timestamp}",
-                    "event_type": event_type_upper,
-                    "entity_type": entity_type,
-                    "entity_fqn": entity_fqn,
-                    "purpose": "sync-ranger-tag-assignments",
-                },
-                sort_keys=True,
-            )
-            fingerprint = hashlib.sha256(logical.encode()).hexdigest()
-            job = self.jobs.enqueue(
-                job_type=JobType.SYNC_RANGER_TAGS,
-                idempotency_key=f"sync-ranger-tags:{fingerprint}",
-                payload={
-                    "entity_type": entity_type,
-                    "entity_fqn": entity_fqn,
-                    "classification_run_id": None,
-                    "correlation_id": correlation_id,
-                },
-                correlation_id=correlation_id,
-                max_attempts=5,
-            )
-            self.audit.record(
-                actor_id="system:openmetadata-webhook",
-                actor_name="OpenMetadata Webhook Adapter",
-                action="RANGER_TAG_SYNC_ENQUEUED",
-                object_type=entity_type,
-                object_id=entity_fqn,
-                correlation_id=correlation_id,
-                details={
-                    "event_id": event_id,
-                    "event_type": event_type,
-                    "next_job_id": str(job.id),
-                    "snapshot_source": "openmetadata-readback",
-                },
-            )
-            created_jobs.append(str(job.id))
+        purposes = EventPurposeRouter.route(event_data)
+        purpose_strings = sorted(p.value for p in purposes)
 
-        # Accepting/rejecting a native Suggestion must not reclassify the asset.
-        should_classify = event_type_upper == "ENTITY_CREATED" or (
-            event_type_upper in {"ENTITY_UPDATED", "ENTITY_FIELDS_CHANGED"}
-            and not tag_changed
+        inbox_record, is_duplicate = self.inbox.record_event(
+            event_id=event_id,
+            event_type=event_type,
+            entity_type=entity_type,
+            entity_fqn=entity_fqn,
+            payload=event_data,
+            purposes=purpose_strings,
+            correlation_id=correlation_id,
         )
-        if should_classify:
-            fields = self._extract_fields(event_data)
-            entity_name = str(
-                event_data.get("entity", {}).get("name")
-                or entity_fqn.split(".")[-1]
-            )
-            description = event_data.get("entity", {}).get("description")
 
-            normalized = MetadataEventRequest(
-                event_id=event_id or f"evt-{timestamp}",
-                event_type=(
-                    "ENTITY_CREATED"
-                    if event_type_upper == "ENTITY_CREATED"
-                    else "ENTITY_UPDATED"
-                ),
-                entity_type=entity_type,
-                entity_fqn=entity_fqn,
-                entity_name=entity_name,
-                description=description,
-                fields=fields,
-                existing_tags=[],
-                correlation_id=correlation_id,
-            )
-
-            logical_classify = (
-                f"{normalized.event_id}|"
-                f"{normalized.entity_type}|"
-                f"{normalized.entity_fqn}"
-            )
-            fingerprint_classify = hashlib.sha256(
-                logical_classify.encode()
-            ).hexdigest()
-            job = self.jobs.enqueue(
-                job_type=JobType.CLASSIFY_ASSET,
-                idempotency_key=f"classify-webhook:{fingerprint_classify}",
-                payload=normalized.model_dump(mode="json"),
-                correlation_id=correlation_id,
-                max_attempts=3,
-            )
+        if is_duplicate:
+            logger.info("Duplicate event %s skipped", event_id)
             self.audit.record(
                 actor_id="system:openmetadata-webhook",
                 actor_name="OpenMetadata Webhook Adapter",
-                action="ASSET_CLASSIFICATION_ENQUEUED",
+                action="EVENT_INBOX_DUPLICATE_SKIPPED",
                 object_type=entity_type,
                 object_id=entity_fqn,
                 correlation_id=correlation_id,
-                details={
-                    "event_id": event_id,
-                    "event_type": event_type,
-                    "next_job_id": str(job.id),
-                },
+                details={"event_id": event_id, "status": "duplicate"},
             )
-            created_jobs.append(str(job.id))
+            return {"status": "duplicate", "event_id": event_id}
 
-        return created_jobs
+        dispatched_tasks: list[str] = []
 
-    @classmethod
-    def _has_tag_change(cls, change_desc: dict[str, Any]) -> bool:
-        for bucket in ("fieldsAdded", "fieldsUpdated", "fieldsDeleted"):
-            changes = change_desc.get(bucket, []) or []
-            for change in changes:
-                if not isinstance(change, dict):
-                    continue
-
-                name = str(change.get("name") or "").lower()
-                if "tag" in name:
-                    return True
-
-                if cls._contains_tag_payload(change.get("oldValue")):
-                    return True
-                if cls._contains_tag_payload(change.get("newValue")):
-                    return True
-        return False
-
-    @classmethod
-    def _contains_tag_payload(cls, value: Any) -> bool:
-        if isinstance(value, dict):
-            for key, nested in value.items():
-                if "tag" in str(key).lower():
-                    return True
-                if cls._contains_tag_payload(nested):
-                    return True
-            return False
-
-        if isinstance(value, list):
-            return any(cls._contains_tag_payload(item) for item in value)
-
-        if isinstance(value, str):
-            lowered = value.lower()
-            return (
-                "tagfqn" in lowered
-                or '"tags"' in lowered
-                or "taglabels" in lowered
-            )
-
-        return False
-
-    def _extract_fields(self, event_data: dict[str, Any]) -> list[MetadataField]:
-        entity = event_data.get("entity") or {}
-        fields: list[MetadataField] = []
-        for column in entity.get("columns", []) or []:
-            if not isinstance(column, dict) or not column.get("name"):
-                continue
-            fields.append(
-                MetadataField(
-                    name=column["name"],
-                    data_type=column.get("dataType"),
-                    description=column.get("description"),
-                    sample_values=[],
+        if EventPurpose.CLASSIFY in purposes:
+            # Dispatch classification task
+            try:
+                task_res = classify_entity.delay(
+                    event_id=event_id,
+                    entity_type=entity_type,
+                    entity_fqn=entity_fqn,
+                    correlation_id=correlation_id,
                 )
+                dispatched_tasks.append(str(task_res.id))
+            except Exception as exc:
+                logger.warning("Could not dispatch classify_entity task: %s", exc)
+
+            self.audit.record(
+                actor_id="system:openmetadata-webhook",
+                actor_name="OpenMetadata Webhook Adapter",
+                action="ASSET_CLASSIFICATION_DISPATCHED",
+                object_type=entity_type,
+                object_id=entity_fqn,
+                correlation_id=correlation_id,
+                details={"event_id": event_id, "purposes": purpose_strings},
             )
-        return fields
+
+        if EventPurpose.TAG_SYNC in purposes:
+            # Dispatch tag sync task (ranger.tag-sync queue, concurrency 1)
+            try:
+                task_res = sync_tags_to_ranger.delay(
+                    entity_type=entity_type,
+                    entity_fqn=entity_fqn,
+                    correlation_id=correlation_id,
+                )
+                dispatched_tasks.append(str(task_res.id))
+            except Exception as exc:
+                logger.warning("Could not dispatch sync_tags_to_ranger task: %s", exc)
+
+            self.audit.record(
+                actor_id="system:openmetadata-webhook",
+                actor_name="OpenMetadata Webhook Adapter",
+                action="RANGER_TAG_SYNC_DISPATCHED",
+                object_type=entity_type,
+                object_id=entity_fqn,
+                correlation_id=correlation_id,
+                details={"event_id": event_id, "purposes": purpose_strings},
+            )
+
+        self.inbox.mark_processed(inbox_record.id)
+
+        return {
+            "status": "accepted",
+            "event_id": event_id,
+            "purposes": purpose_strings,
+            "dispatched_tasks": dispatched_tasks,
+        }

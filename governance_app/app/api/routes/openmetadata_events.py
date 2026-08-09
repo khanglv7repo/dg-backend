@@ -35,11 +35,12 @@ def accept_openmetadata_event(
     adapter.verify_webhook_token(auth_secret)
 
     with db.begin():
-        job_ids = adapter.process_change_event(request.model_dump(mode="json"))
+        res = adapter.process_change_event(request.model_dump(mode="json"))
+        tasks = res.get("dispatched_tasks") or []
 
     return OpenMetadataWebhookResponse(
-        status="accepted",
-        created_job_ids=job_ids,
+        status=res.get("status", "accepted"),
+        created_job_ids=tasks,
     )
 
 

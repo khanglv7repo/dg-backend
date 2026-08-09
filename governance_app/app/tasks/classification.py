@@ -1,36 +1,241 @@
-"""Celery tasks for entity classification."""
+"""Celery tasks for entity classification (R3 TAG Vertical Slice).
+
+Handles deterministic rule evaluation, direct OpenMetadata Confirmed tag mutations on MATCH,
+read-back verification, and handoff to ai.classification queue on NO_MATCH/AMBIGUOUS/CONFLICT.
+"""
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from app.celery_app import app
+from app.clients.openmetadata import OpenMetadataClient
+from app.core.config import get_settings
+from app.db.session import SessionLocal
+from app.schemas.classification import MatchOutcome
+from app.repositories.audit import AuditRepository
+from app.repositories.classification_execution import ClassificationExecutionRepository
+from app.schemas.events import MetadataEventRequest, MetadataField
+from app.services.classification_rule_catalog import ClassificationRuleCatalogService
 
 logger = logging.getLogger(__name__)
 
 
+def _extract_fields_from_entity(entity: dict[str, Any]) -> list[MetadataField]:
+    fields: list[MetadataField] = []
+    for column in entity.get("columns", []) or []:
+        if isinstance(column, dict) and column.get("name"):
+            fields.append(
+                MetadataField(
+                    name=column["name"],
+                    data_type=column.get("dataType"),
+                    description=column.get("description"),
+                    sample_values=[],
+                )
+            )
+    return fields
+
+
 @app.task(name="app.tasks.classification.classify_entity", bind=True, max_retries=3)
-def classify_entity(self, *, event_id: str, entity_type: str, entity_fqn: str,
-                    correlation_id: str | None = None) -> dict:
-    """Run deterministic classification on an entity.
+def classify_entity(
+    self,
+    *,
+    event_id: str,
+    entity_type: str,
+    entity_fqn: str,
+    correlation_id: str | None = None,
+) -> dict[str, Any]:
+    """Run deterministic classification on an entity using latest OpenMetadata state."""
+    settings = get_settings()
+    om_client = OpenMetadataClient(
+        base_url=settings.openmetadata_base_url,
+        token=(
+            settings.openmetadata_execution_bot_token.get_secret_value()
+            if settings.openmetadata_execution_bot_token
+            else None
+        ),
+        timeout=settings.openmetadata_timeout_seconds,
+    )
 
-    If the deterministic classifier returns MATCH, writes the tag directly
-    to OpenMetadata. For NO_MATCH/AMBIGUOUS/CONFLICT, transitions to
-    WAITING_AI and enqueues on the ai.classification queue.
+    with SessionLocal() as session:
+        exec_repo = ClassificationExecutionRepository(session)
+        audit_repo = AuditRepository(session)
+
+        # Create EVALUATING execution record
+        execution = exec_repo.create(
+            event_id=event_id,
+            entity_type=entity_type,
+            entity_fqn=entity_fqn,
+            generation=1,
+            status="EVALUATING",
+            correlation_id=correlation_id,
+        )
+
+        try:
+            # 1. Re-read latest OpenMetadata entity state (Latest-state rule)
+            latest_entity = om_client.get_entity(
+                entity_type=entity_type,
+                fqn=entity_fqn,
+                fields="tags,columns",
+            )
+            entity_name = str(latest_entity.get("name") or entity_fqn.split(".")[-1])
+            description = latest_entity.get("description")
+            fields = _extract_fields_from_entity(latest_entity)
+
+            normalized_event = MetadataEventRequest(
+                event_id=event_id,
+                event_type="ENTITY_UPDATED",
+                entity_type=entity_type,
+                entity_fqn=entity_fqn,
+                entity_name=entity_name,
+                description=description,
+                fields=fields,
+                existing_tags=[],
+                correlation_id=correlation_id,
+            )
+
+            # 2. Evaluate active rule engine
+            catalog_service = ClassificationRuleCatalogService(session)
+            engine = catalog_service.active_engine()
+            eval_result = engine.evaluate(normalized_event)
+
+            outcome_str = eval_result.outcome.value
+
+            if eval_result.outcome == MatchOutcome.EXACT:
+                # Deterministic MATCH -> Write Confirmed tag directly to OpenMetadata
+                entity_tags: list[str] = []
+                field_tags: dict[str, list[str]] = {}
+
+                for sugg in eval_result.suggestions:
+                    if sugg.field_path:
+                        field_tags.setdefault(sugg.field_path, []).append(sugg.tag)
+                    else:
+                        entity_tags.append(sugg.tag)
+
+                all_tags = set(entity_tags)
+                for tags in field_tags.values():
+                    all_tags.update(tags)
+
+                # Validate tags exist in OpenMetadata taxonomy
+                om_client.validate_tag_fqns(list(all_tags))
+
+                # Apply Confirmed tags directly
+                observed = om_client.apply_confirmed_tags(
+                    entity_type=entity_type,
+                    entity_fqn=entity_fqn,
+                    entity_tags=entity_tags,
+                    field_tags=field_tags,
+                    label_type="Automated",
+                )
+
+                # Read-back assertion
+                om_client.assert_confirmed_tags(
+                    observed,
+                    entity_tags=entity_tags,
+                    field_tags=field_tags,
+                )
+
+                # Mark execution as COMPLETED
+                exec_repo.update_status(
+                    execution.id,
+                    status="COMPLETED",
+                    outcome="MATCH",
+                    suggestions=[s.model_dump(mode="json") for s in eval_result.suggestions],
+                    evidence=eval_result.evidence,
+                )
+
+                audit_repo.record(
+                    actor_id="bot:governance-execution-bot",
+                    actor_name="Governance Execution Bot",
+                    action="DETERMINISTIC_MATCH_MUTATED_OM",
+                    object_type=entity_type,
+                    object_id=entity_fqn,
+                    correlation_id=correlation_id,
+                    details={
+                        "execution_id": str(execution.id),
+                        "outcome": "MATCH",
+                        "applied_entity_tags": entity_tags,
+                        "applied_field_tags": field_tags,
+                    },
+                )
+                session.commit()
+
+                return {
+                    "status": "COMPLETED",
+                    "outcome": "MATCH",
+                    "execution_id": str(execution.id),
+                }
+
+            else:
+                # NO_MATCH, AMBIGUOUS, or CONFLICT -> Transition to WAITING_AI & enqueue on ai.classification queue
+                exec_repo.update_status(
+                    execution.id,
+                    status="WAITING_AI",
+                    outcome=outcome_str,
+                    suggestions=[s.model_dump(mode="json") for s in eval_result.suggestions],
+                    evidence=eval_result.evidence,
+                )
+
+                audit_repo.record(
+                    actor_id="system:classification-engine",
+                    actor_name="Classification Engine",
+                    action="AI_FALLBACK_ENQUEUED",
+                    object_type=entity_type,
+                    object_id=entity_fqn,
+                    correlation_id=correlation_id,
+                    details={
+                        "execution_id": str(execution.id),
+                        "generation": execution.generation,
+                        "outcome": outcome_str,
+                    },
+                )
+                session.commit()
+
+                # Enqueue on ai.classification queue
+                ai_classify_entity.delay(
+                    execution_id=str(execution.id),
+                    generation=execution.generation,
+                )
+
+                return {
+                    "status": "WAITING_AI",
+                    "outcome": outcome_str,
+                    "execution_id": str(execution.id),
+                    "generation": execution.generation,
+                }
+
+        except Exception as exc:
+            session.rollback()
+            logger.exception("classify_entity failed for %s: %s", entity_fqn, exc)
+            raise self.retry(exc=exc, countdown=10)
+        finally:
+            om_client.close()
+
+
+@app.task(
+    name="app.tasks.classification.ai_classify_entity",
+    queue="ai.classification",
+    bind=True,
+    max_retries=2,
+)
+def ai_classify_entity(
+    self,
+    *,
+    execution_id: str,
+    generation: int,
+) -> dict[str, Any]:
+    """AI fallback handoff task.
+
+    Receives minimal durable identity: execution_id + generation.
+    Remains WAITING_AI during R3 (Agent consumer implemented in R6).
     """
-    # TODO: Wire to ClassificationService once event_inbox model exists (R3)
-    logger.info("classify_entity called for %s (event=%s)", entity_fqn, event_id)
-    return {"status": "not_implemented", "event_id": event_id}
-
-
-@app.task(name="app.tasks.classification.ai_classify_entity",
-          queue="ai.classification", bind=True, max_retries=2)
-def ai_classify_entity(self, *, execution_id: str, generation: int) -> dict:
-    """AI fallback classification for entities that deterministic rules could not classify.
-
-    Receives only execution_id + generation as per the context contract.
-    The Agent re-reads full context from OpenMetadata MCP before reasoning.
-    """
-    # TODO: Wire to Agent runner once Backend MCP exists (R5/R6)
-    logger.info("ai_classify_entity called for execution_id=%s generation=%d",
-                execution_id, generation)
-    return {"status": "not_implemented", "execution_id": execution_id}
+    logger.info(
+        "ai_classify_entity handoff received for execution_id=%s generation=%d",
+        execution_id,
+        generation,
+    )
+    return {
+        "status": "WAITING_AI",
+        "execution_id": execution_id,
+        "generation": generation,
+    }

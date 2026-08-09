@@ -1,12 +1,12 @@
+from unittest.mock import patch
 import pytest
 from pydantic import SecretStr
 
 from app.core.config import Settings
 from app.core.errors import AuthorizationError
-from app.models.enums import JobType
-from app.repositories.jobs import JobRepository
 from app.repositories.watermark import IntegrationWatermarkRepository
 from app.services.asset_discovery import AssetDiscoveryService
+from app.services.event_router import EventPurpose
 from app.services.openmetadata_event_adapter import OpenMetadataEventAdapterService
 
 
@@ -38,13 +38,19 @@ def test_webhook_adapter_entity_created_event(session) -> None:
         },
     }
 
-    with session.begin():
-        job_ids = adapter.process_change_event(raw_event)
+    with patch("app.services.openmetadata_event_adapter.classify_entity") as mock_classify, \
+         patch("app.services.openmetadata_event_adapter.sync_tags_to_ranger") as mock_tag_sync:
+        mock_classify.delay.return_value.id = "task-c1"
+        mock_tag_sync.delay.return_value.id = "task-t1"
 
-    assert len(job_ids) == 1
-    job = JobRepository(session).get(job_ids[0])
-    assert job.job_type == JobType.CLASSIFY_ASSET.value
-    assert job.payload["entity_fqn"] == "hive.sales.customers"
+        with session.begin():
+            res = adapter.process_change_event(raw_event)
+
+        assert res["status"] == "accepted"
+        assert EventPurpose.CLASSIFY.value in res["purposes"]
+        assert EventPurpose.TAG_SYNC.value in res["purposes"]
+        mock_classify.delay.assert_called_once()
+        mock_tag_sync.delay.assert_called_once()
 
 
 def test_webhook_adapter_confirmed_tag_change(session) -> None:
@@ -71,21 +77,22 @@ def test_webhook_adapter_confirmed_tag_change(session) -> None:
         },
     }
 
-    with session.begin():
-        job_ids = adapter.process_change_event(raw_event)
+    with patch("app.services.openmetadata_event_adapter.classify_entity") as mock_classify, \
+         patch("app.services.openmetadata_event_adapter.sync_tags_to_ranger") as mock_tag_sync:
+        mock_tag_sync.delay.return_value.id = "task-t2"
 
-    # Tag lifecycle is separate from classification. A tag-only change triggers
-    # live OpenMetadata read-back and Ranger tag-assignment sync, but must not
-    # reclassify the same asset and create an event loop.
-    assert len(job_ids) == 1
-    job = JobRepository(session).get(job_ids[0])
-    assert job.job_type == JobType.SYNC_RANGER_TAGS.value
-    assert job.payload == {
-        "entity_type": "table",
-        "entity_fqn": "hive.sales.customers",
-        "classification_run_id": None,
-        "correlation_id": "om-event-evt-002",
-    }
+        with session.begin():
+            res = adapter.process_change_event(raw_event)
+
+        # Tag-only change triggers TAG_SYNC, but MUST NOT reclassify to prevent loops!
+        assert res["status"] == "accepted"
+        assert res["purposes"] == [EventPurpose.TAG_SYNC.value]
+        mock_classify.delay.assert_not_called()
+        mock_tag_sync.delay.assert_called_once_with(
+            entity_type="table",
+            entity_fqn="hive.sales.customers",
+            correlation_id="om-event-evt-002",
+        )
 
 
 def test_watermark_repository(session) -> None:
