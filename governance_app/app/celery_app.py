@@ -45,4 +45,10 @@ app.conf.update(
     },
 )
 
-app.autodiscover_tasks(["app.tasks"])
+app.conf.imports = (
+    "app.tasks.classification",
+    "app.tasks.ingestion",
+    "app.tasks.policy_sync",
+    "app.tasks.recovery",
+    "app.tasks.tag_sync",
+)

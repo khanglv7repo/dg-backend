@@ -254,27 +254,38 @@ class OpenMetadataClient:
         accepted as confirmed for deployed OM versions that omit state for
         confirmed assignments, while explicit Suggested labels are excluded.
         """
-        response = self._request(
-            "GET",
-            "/v1/tables",
-            params={"limit": limit, "fields": "tags,columns"},
-        )
         snapshots: list[dict[str, Any]] = []
-        for table in response.get("data", []) or []:
-            if not isinstance(table, dict):
-                continue
-            entity_fqn = str(
-                table.get("fullyQualifiedName") or table.get("name") or ""
-            ).strip()
-            if not entity_fqn:
-                continue
-            snapshots.append(
-                self._confirmed_snapshot_from_entity(
-                    entity_type="table",
-                    entity_fqn=entity_fqn,
-                    entity=table,
-                )
+        after: str | None = None
+        while True:
+            params = {"limit": limit, "fields": "tags,columns"}
+            if after:
+                params["after"] = after
+
+            response = self._request(
+                "GET",
+                "/v1/tables",
+                params=params,
             )
+            for table in response.get("data", []) or []:
+                if not isinstance(table, dict):
+                    continue
+                entity_fqn = str(
+                    table.get("fullyQualifiedName") or table.get("name") or ""
+                ).strip()
+                if not entity_fqn:
+                    continue
+                snapshots.append(
+                    self._confirmed_snapshot_from_entity(
+                        entity_type="table",
+                        entity_fqn=entity_fqn,
+                        entity=table,
+                    )
+                )
+
+            paging = response.get("paging") or {}
+            after = paging.get("after")
+            if not after:
+                break
         return snapshots
 
     def find_open_tag_suggestion(
@@ -502,15 +513,36 @@ class OpenMetadataClient:
             )
 
         current = list(entity.get("tags", []) or [])
-        existing = {item.get("tagFQN") for item in current if item.get("tagFQN")}
-        additions = [
-            self.tag_label(tag, label_type=label_type, state="Confirmed")
-            for tag in sorted(set(tags) - existing)
-        ]
-        if not additions:
+        if self._requires_confirmed_promotion(current, tags):
+            current = self._remove_tag_labels(current, tags)
+            self._request(
+                "PATCH",
+                f"/v1/{self.collection_for(entity_type)}/{entity_id}",
+                json=[
+                    {
+                        "op": "replace" if "tags" in entity else "add",
+                        "path": "/tags",
+                        "value": current,
+                    }
+                ],
+                headers={"Content-Type": "application/json-patch+json"},
+            )
+
+        merged = self._merge_confirmed_tag_labels(
+            current,
+            desired_tags=tags,
+            label_type=label_type,
+        )
+        if merged == current:
             return
 
-        patch = [{"op": "add", "path": "/tags", "value": current + additions}]
+        patch = [
+            {
+                "op": "replace" if "tags" in entity else "add",
+                "path": "/tags",
+                "value": merged,
+            }
+        ]
         collection = self.collection_for(entity_type)
         self._request(
             "PATCH",
@@ -541,7 +573,7 @@ class OpenMetadataClient:
         table = self.get_entity(
             entity_type="table",
             fqn=table_fqn,
-            fields="columns",
+            fields="tags,columns",
         )
 
         table_id = table.get("id")
@@ -575,22 +607,35 @@ class OpenMetadataClient:
             )
 
         current = list(column.get("tags", []) or [])
-        existing = {
-            item.get("tagFQN")
-            for item in current
-            if isinstance(item, dict) and item.get("tagFQN")
-        }
-
-        additions = [
-            self.tag_label(
-                tag,
-                label_type=label_type,
-                state="Confirmed",
+        if self._requires_confirmed_promotion(current, tags):
+            current = self._remove_tag_labels(current, tags)
+            self._request(
+                "PATCH",
+                f"/v1/tables/name/{quote(table_fqn, safe='')}",
+                json=[
+                    {
+                        "op": (
+                            "replace"
+                            if "tags" in column
+                            else "add"
+                        ),
+                        "path": f"/columns/{column_index}/tags",
+                        "value": current,
+                    }
+                ],
+                headers={
+                    "Content-Type":
+                        "application/json-patch+json"
+                },
             )
-            for tag in sorted(set(tags) - existing)
-        ]
 
-        if additions:
+        merged = self._merge_confirmed_tag_labels(
+            current,
+            desired_tags=tags,
+            label_type=label_type,
+        )
+
+        if merged != current:
             patch = [
                 {
                     "op": (
@@ -599,7 +644,7 @@ class OpenMetadataClient:
                         else "add"
                     ),
                     "path": f"/columns/{column_index}/tags",
-                    "value": current + additions,
+                    "value": merged,
                 }
             ]
 
@@ -616,8 +661,92 @@ class OpenMetadataClient:
         return self.get_column(
             column_fqn=column_fqn,
             entity_type=entity_type,
-            fields="columns",
+            fields="tags,columns",
         )
+
+    @classmethod
+    def _merge_confirmed_tag_labels(
+        cls,
+        current: list[Any],
+        *,
+        desired_tags: list[str],
+        label_type: str,
+    ) -> list[dict[str, Any]]:
+        desired = sorted({str(tag).strip() for tag in desired_tags if str(tag).strip()})
+        if not desired:
+            return [item for item in current if isinstance(item, dict)]
+
+        remaining_desired = set(desired)
+        merged: list[dict[str, Any]] = []
+        seen: set[str] = set()
+
+        for item in current:
+            if not isinstance(item, dict):
+                continue
+            tag_fqn = str(item.get("tagFQN") or "").strip()
+            if not tag_fqn:
+                merged.append(dict(item))
+                continue
+
+            if tag_fqn in remaining_desired:
+                if tag_fqn in seen:
+                    continue
+                promoted = dict(item)
+                promoted.update(
+                    cls.tag_label(
+                        tag_fqn,
+                        label_type=label_type,
+                        state="Confirmed",
+                    )
+                )
+                merged.append(promoted)
+                seen.add(tag_fqn)
+                continue
+
+            merged.append(dict(item))
+
+        for tag_fqn in desired:
+            if tag_fqn not in seen:
+                merged.append(
+                    cls.tag_label(
+                        tag_fqn,
+                        label_type=label_type,
+                        state="Confirmed",
+                    )
+                )
+
+        return merged
+
+    @staticmethod
+    def _requires_confirmed_promotion(
+        current: list[Any],
+        desired_tags: list[str],
+    ) -> bool:
+        desired = {str(tag).strip() for tag in desired_tags if str(tag).strip()}
+        for item in current:
+            if not isinstance(item, dict):
+                continue
+            tag_fqn = str(item.get("tagFQN") or "").strip()
+            if tag_fqn not in desired:
+                continue
+            state = item.get("state")
+            state_text = str(state).strip().lower() if state is not None else "confirmed"
+            if state_text != "confirmed":
+                return True
+        return False
+
+    @staticmethod
+    def _remove_tag_labels(
+        current: list[Any],
+        desired_tags: list[str],
+    ) -> list[dict[str, Any]]:
+        desired = {str(tag).strip() for tag in desired_tags if str(tag).strip()}
+        return [
+            dict(item)
+            for item in current
+            if isinstance(item, dict)
+            and str(item.get("tagFQN") or "").strip() not in desired
+        ]
 
     def _request(self, method: str, path: str, **kwargs) -> dict:
         try:

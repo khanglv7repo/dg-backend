@@ -36,7 +36,7 @@ def test_openmetadata_column_update_uses_parent_table_fqn_patch_and_reads_back()
         ):
             fields = request.url.params.get("fields")
 
-            if fields == "columns":
+            if fields == "tags,columns":
                 column_read_count += 1
 
                 tags = (
@@ -259,6 +259,212 @@ def test_openmetadata_confirmed_snapshot_accepts_missing_state_as_confirmed() ->
             {"tagFQN": "PII.Email", "state": "Suggested"},
         ]
     ) == ["PII.Phone"]
+
+
+def test_entity_suggested_tag_is_promoted_to_confirmed() -> None:
+    calls: list[list[dict]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path.endswith("/v1/tables/name/hive.sales.customers"):
+            return httpx.Response(
+                200,
+                json={
+                    "id": "table-id",
+                    "tags": [
+                        {"tagFQN": "PII.Phone", "state": "Suggested"},
+                        {"tagFQN": "Lifecycle.Pending", "state": "Suggested"},
+                    ],
+                },
+            )
+        if request.method == "PATCH":
+            calls.append(json.loads(request.content))
+            return httpx.Response(200, json={"id": "table-id"})
+        return httpx.Response(500)
+
+    client = OpenMetadataClient(base_url="http://openmetadata/api", token=None)
+    client.client.close()
+    client.client = httpx.Client(
+        base_url="http://openmetadata/api",
+        transport=httpx.MockTransport(handler),
+    )
+
+    client._merge_entity_tags(
+        entity_type="table",
+        entity_fqn="hive.sales.customers",
+        tags=["PII.Phone"],
+        label_type="Automated",
+    )
+
+    assert len(calls) == 2
+    assert calls[0][0]["value"] == [
+        {"tagFQN": "Lifecycle.Pending", "state": "Suggested"},
+    ]
+    value = calls[1][0]["value"]
+    assert value == [
+        {"tagFQN": "Lifecycle.Pending", "state": "Suggested"},
+        {
+            "tagFQN": "PII.Phone",
+            "state": "Confirmed",
+            "source": "Classification",
+            "labelType": "Automated",
+        },
+    ]
+
+
+def test_column_suggested_tag_is_promoted_to_confirmed() -> None:
+    calls: list[list[dict]] = []
+    read_count = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal read_count
+        if request.method == "GET" and request.url.path.endswith("/v1/tables/name/hive.sales.customers"):
+            read_count += 1
+            return httpx.Response(
+                200,
+                json={
+                    "id": "table-id",
+                    "columns": [
+                        {
+                            "name": "phone",
+                            "fullyQualifiedName": "hive.sales.customers.phone",
+                            "tags": [
+                                {"tagFQN": "PII.Phone", "state": "Suggested"},
+                                {"tagFQN": "PII.Email", "state": "Suggested"},
+                            ],
+                        }
+                    ],
+                },
+            )
+        if request.method == "PATCH":
+            calls.append(json.loads(request.content))
+            return httpx.Response(200, json={"id": "table-id"})
+        return httpx.Response(500)
+
+    client = OpenMetadataClient(base_url="http://openmetadata/api", token=None)
+    client.client.close()
+    client.client = httpx.Client(
+        base_url="http://openmetadata/api",
+        transport=httpx.MockTransport(handler),
+    )
+
+    client._merge_column_tags(
+        column_fqn="hive.sales.customers.phone",
+        entity_type="table",
+        tags=["PII.Phone"],
+        label_type="Automated",
+    )
+
+    assert len(calls) == 2
+    assert calls[0][0]["value"] == [
+        {"tagFQN": "PII.Email", "state": "Suggested"},
+    ]
+    value = calls[1][0]["value"]
+    assert value == [
+        {"tagFQN": "PII.Email", "state": "Suggested"},
+        {
+            "tagFQN": "PII.Phone",
+            "state": "Confirmed",
+            "source": "Classification",
+            "labelType": "Automated",
+        },
+    ]
+    assert read_count == 2
+
+
+def test_confirmed_tag_is_not_duplicated() -> None:
+    client = OpenMetadataClient(base_url="http://openmetadata/api", token=None)
+
+    merged = client._merge_confirmed_tag_labels(
+        [
+            {"tagFQN": "PII.Phone", "state": "Confirmed", "labelType": "Manual"},
+        ],
+        desired_tags=["PII.Phone"],
+        label_type="Automated",
+    )
+
+    assert [item["tagFQN"] for item in merged] == ["PII.Phone"]
+    assert merged[0]["state"] == "Confirmed"
+
+
+def test_unrelated_suggested_tag_is_preserved_but_not_authoritative() -> None:
+    client = OpenMetadataClient(base_url="http://openmetadata/api", token=None)
+
+    labels = client._merge_confirmed_tag_labels(
+        [{"tagFQN": "PII.Email", "state": "Suggested"}],
+        desired_tags=["PII.Phone"],
+        label_type="Automated",
+    )
+
+    assert labels == [
+        {"tagFQN": "PII.Email", "state": "Suggested"},
+        {
+            "tagFQN": "PII.Phone",
+            "source": "Classification",
+            "labelType": "Automated",
+            "state": "Confirmed",
+        },
+    ]
+    assert client._confirmed_tag_fqns(labels) == ["PII.Phone"]
+
+
+def test_list_confirmed_table_tag_snapshots_follows_openmetadata_paging() -> None:
+    seen_after: list[str | None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        after = request.url.params.get("after")
+        seen_after.append(after)
+        if after is None:
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {
+                            "name": "customers",
+                            "fullyQualifiedName": "svc.db.crm.customers",
+                            "columns": [
+                                {
+                                    "name": "phone",
+                                    "tags": [{"tagFQN": "PII.Phone", "state": "Confirmed"}],
+                                }
+                            ],
+                        }
+                    ],
+                    "paging": {"after": "cursor-2", "total": 2},
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {
+                        "name": "contacts",
+                        "fullyQualifiedName": "svc.db.crm.contacts",
+                        "columns": [
+                            {
+                                "name": "email",
+                                "tags": [{"tagFQN": "PII.Email", "state": "Confirmed"}],
+                            }
+                        ],
+                    }
+                ],
+                "paging": {"total": 2},
+            },
+        )
+
+    client = OpenMetadataClient(base_url="http://openmetadata/api", token=None)
+    client.client.close()
+    client.client = httpx.Client(
+        base_url="http://openmetadata/api",
+        transport=httpx.MockTransport(handler),
+    )
+
+    snapshots = client.list_confirmed_table_tag_snapshots(limit=1)
+
+    assert seen_after == [None, "cursor-2"]
+    assert [item["entity_fqn"] for item in snapshots] == [
+        "svc.db.crm.customers",
+        "svc.db.crm.contacts",
+    ]
 
 
 def test_openmetadata_native_tag_suggestion_payload() -> None:

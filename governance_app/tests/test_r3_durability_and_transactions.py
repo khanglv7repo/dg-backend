@@ -3,9 +3,18 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import anyio
+import httpx
+from fastapi import FastAPI
+from sqlalchemy import create_engine
 from sqlalchemy.orm import Session as SQLAlchemySession
+from sqlalchemy.orm import sessionmaker
 
+from app import models  # noqa: F401
+from app.api.dependencies import get_db, get_settings
+from app.api.routes import openmetadata_events
 from app.core.config import Settings
+from app.db.base import Base
 from app.models.event_inbox import EventInbox
 from app.services.openmetadata_event_adapter import OpenMetadataEventAdapterService
 
@@ -179,3 +188,73 @@ def test_openmetadata_route_does_not_wrap_service_owned_transactions() -> None:
 
     assert "with db.begin()" not in route_body
     assert "adapter.process_change_event" in route_body
+
+
+def test_openmetadata_webhook_route_http_integration_uses_service_owned_transactions(tmp_path) -> None:
+    raw_event = {
+        "id": "evt-route-http-001",
+        "eventType": "entityCreated",
+        "entityType": "table",
+        "entityFullyQualifiedName": "trino_catalog.sales.orders",
+        "timestamp": 1722240200000,
+    }
+
+    engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'route.db'}")
+    factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+    Base.metadata.create_all(engine)
+
+    async def override_db():
+        route_session = factory()
+        try:
+            yield route_session
+        finally:
+            route_session.close()
+
+    async def override_settings() -> Settings:
+        return _settings()
+
+    test_app = FastAPI()
+    test_app.include_router(
+        openmetadata_events.router,
+        prefix="/api/v1/integrations/openmetadata",
+    )
+    test_app.dependency_overrides[get_db] = override_db
+    test_app.dependency_overrides[get_settings] = override_settings
+    try:
+        with patch("app.services.openmetadata_event_adapter.classify_entity") as mock_classify, \
+             patch("app.services.openmetadata_event_adapter.sync_tags_to_ranger") as mock_tag_sync:
+            mock_classify.delay.return_value.id = "task-route-classify"
+            mock_tag_sync.delay.return_value.id = "task-route-sync"
+
+            async def call_route() -> httpx.Response:
+                transport = httpx.ASGITransport(app=test_app)
+                async with httpx.AsyncClient(
+                    transport=transport,
+                    base_url="http://testserver",
+                ) as client:
+                    return await client.post(
+                        "/api/v1/integrations/openmetadata/events",
+                        json=raw_event,
+                    )
+
+            response = anyio.run(call_route)
+
+        assert response.status_code == 202
+        body = response.json()
+        assert body["event_id"] == "evt-route-http-001"
+        assert set(body["purposes"]) == {"CLASSIFY", "TAG_SYNC"}
+        assert body["dispatched_tasks"] == [
+            "task-route-classify",
+            "task-route-sync",
+        ]
+
+        with factory() as assertion_session:
+            inbox = (
+                assertion_session.query(EventInbox)
+                .filter(EventInbox.event_id == "evt-route-http-001")
+                .one()
+            )
+            assert inbox.status == "PROCESSED"
+    finally:
+        test_app.dependency_overrides.clear()
+        Base.metadata.drop_all(engine)

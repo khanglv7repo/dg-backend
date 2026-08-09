@@ -226,7 +226,6 @@ class RangerTagStoreClient:
             int(item["id"]): item
             for item in self.list_resources()
             if item.get("id") is not None
-            and self._is_managed_entity_resource(item, entity_fqn)
         }
         if not resources:
             return set()
@@ -248,16 +247,13 @@ class RangerTagStoreClient:
             tag = tags.get(int(tag_id))
             if resource is None or tag is None:
                 continue
+            if not self._is_managed_entity_resource(resource, entity_fqn) and not (
+                self._is_backend_managed_tag(tag)
+                and self._resource_entity_fqn(resource) == entity_fqn
+            ):
+                continue
 
-            info = resource.get("additionalInfo") or {}
-            field_path = info.get("fieldPath")
-            if not field_path:
-                elements = resource.get("resourceElements") or {}
-                cols = (elements.get("column") or {}).get("values") or []
-                if cols and cols != ["*"]:
-                    field_path = f"columns.{cols[0]}"
-                else:
-                    field_path = "$entity"
+            field_path = self._field_path_for_resource(resource)
 
             tag_type = str(tag.get("type") or "")
             if tag_type:
@@ -265,7 +261,11 @@ class RangerTagStoreClient:
 
         return actual
 
-    def read_actual_service_state(self) -> set[tuple[str, str, str]]:
+    def read_actual_service_state(
+        self,
+        *,
+        resource_scope: set[tuple[str, str]] | None = None,
+    ) -> set[tuple[str, str, str]]:
         """Read all Backend-owned Ranger tag mappings for the configured service."""
         if self.dry_run:
             return set()
@@ -273,7 +273,7 @@ class RangerTagStoreClient:
         resources = {
             int(item["id"]): item
             for item in self.list_resources()
-            if item.get("id") is not None and self._is_backend_managed_resource(item)
+            if item.get("id") is not None
         }
         tags = {
             int(item["id"]): item
@@ -291,8 +291,14 @@ class RangerTagStoreClient:
             tag = tags.get(int(tag_id))
             if resource is None or tag is None:
                 continue
-            entity_fqn = str((resource.get("additionalInfo") or {}).get("openmetadataFqn") or "")
+            strict_resource_marker = self._is_backend_managed_resource(resource)
+            entity_fqn = self._resource_entity_fqn(resource)
             field_path = self._field_path_for_resource(resource)
+            if not strict_resource_marker:
+                if not self._is_backend_managed_tag(tag):
+                    continue
+                if resource_scope is None or (entity_fqn, field_path) not in resource_scope:
+                    continue
             tag_type = str(tag.get("type") or "")
             if entity_fqn and field_path and tag_type:
                 actual.add((entity_fqn, field_path, tag_type))
@@ -404,6 +410,7 @@ class RangerTagStoreClient:
         self,
         *,
         expected: set[tuple[str, str, str]],
+        resource_scope: set[tuple[str, str]] | None = None,
     ) -> list[dict[str, str]]:
         """Delete stale mappings only from strictly Backend-owned resources."""
         if self.dry_run:
@@ -412,7 +419,7 @@ class RangerTagStoreClient:
         resources = {
             int(item["id"]): item
             for item in self.list_resources()
-            if item.get("id") is not None and self._is_backend_managed_resource(item)
+            if item.get("id") is not None
         }
         tags = {
             int(item["id"]): item
@@ -431,16 +438,25 @@ class RangerTagStoreClient:
             tag = tags.get(int(tag_id))
             if resource is None or tag is None:
                 continue
-
-            entity_fqn = str((resource.get("additionalInfo") or {}).get("openmetadataFqn") or "")
+            strict_resource_marker = self._is_backend_managed_resource(resource)
+            entity_fqn = self._resource_entity_fqn(resource)
             field_path = self._field_path_for_resource(resource)
+            if not strict_resource_marker:
+                if not self._is_backend_managed_tag(tag):
+                    continue
+                if resource_scope is None or (entity_fqn, field_path) not in resource_scope:
+                    continue
             tag_type = str(tag.get("type") or "")
             if not entity_fqn or not field_path or not tag_type:
                 continue
             if (entity_fqn, field_path, tag_type) in expected:
                 continue
 
-            self._request("DELETE", f"/tagresourcemaps/{mapping_id}", allow_404=True)
+            self._delete_tag_resource_map(
+                mapping_id=mapping_id,
+                resource=resource,
+                tag=tag,
+            )
             removed.append(
                 {
                     "entity_fqn": entity_fqn,
@@ -502,7 +518,11 @@ class RangerTagStoreClient:
             if mapping_id is None:
                 continue
 
-            self._request("DELETE", f"/tagresourcemaps/{mapping_id}", allow_404=True)
+            self._delete_tag_resource_map(
+                mapping_id=mapping_id,
+                resource=resource,
+                tag=tag,
+            )
             removed.append(
                 {
                     "field_path": field_path,
@@ -529,6 +549,29 @@ class RangerTagStoreClient:
                 continue
             return item
         return None
+
+    def _delete_tag_resource_map(
+        self,
+        *,
+        mapping_id: Any,
+        resource: dict,
+        tag: dict,
+    ) -> None:
+        resource_guid = str(resource.get("guid") or "").strip()
+        tag_guid = str(tag.get("guid") or "").strip()
+        if resource_guid and tag_guid:
+            self._request(
+                "DELETE",
+                "/tagresourcemaps",
+                params={
+                    "resource-guid": resource_guid,
+                    "tag-guid": tag_guid,
+                },
+                allow_404=True,
+            )
+            return
+
+        self._request("DELETE", f"/tagresourcemap/{mapping_id}", allow_404=True)
 
     def _resource_document(
         self,
@@ -604,6 +647,24 @@ class RangerTagStoreClient:
             str(info.get("managedBy") or "") == "dg-backend"
             and bool(str(info.get("openmetadataFqn") or "").strip())
         )
+
+    @staticmethod
+    def _is_backend_managed_tag(tag: dict) -> bool:
+        options = tag.get("options") or {}
+        return str(options.get("managedBy") or "") == "dg-backend"
+
+    @staticmethod
+    def _resource_entity_fqn(resource: dict) -> str:
+        info = resource.get("additionalInfo") or {}
+        marked_fqn = str(info.get("openmetadataFqn") or "").strip()
+        if marked_fqn:
+            return marked_fqn
+
+        elements = resource.get("resourceElements") or {}
+        tables = (elements.get("table") or {}).get("values") or []
+        if len(tables) == 1 and str(tables[0]).strip():
+            return str(tables[0])
+        return ""
 
     @classmethod
     def _field_path_for_resource(cls, resource: dict) -> str:

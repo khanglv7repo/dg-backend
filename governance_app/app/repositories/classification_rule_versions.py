@@ -34,6 +34,12 @@ class ClassificationRuleVersionRepository:
             .first()
         )
 
+    def is_active(self, version_id: uuid.UUID | str, rule_key: str = "default") -> bool:
+        if isinstance(version_id, str):
+            version_id = uuid.UUID(version_id)
+        active = self.get_active(rule_key)
+        return active is not None and active.id == version_id
+
     def create(
         self,
         *,

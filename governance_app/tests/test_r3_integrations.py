@@ -8,6 +8,7 @@ import pytest
 from app.clients.openmetadata import OpenMetadataClient
 from app.clients.ranger_tags import RangerTagStoreClient
 from app.core.config import Settings
+from app.models.classification_execution import ClassificationExecution
 from app.models.event_inbox import EventInbox
 from app.schemas.classification import MatchOutcome
 from app.services.event_router import EventPurpose
@@ -119,6 +120,268 @@ def test_integration_b_deterministic_match_direct_om_write(session) -> None:
         mock_om_client.apply_confirmed_tags.assert_called_once()
         mock_om_client.assert_confirmed_tags.assert_called_once()
         mock_om_client.create_tag_suggestion.assert_not_called()
+
+        execution = session.query(ClassificationExecution).one()
+        assert execution.rule_version_id is not None
+
+
+def test_execution_records_exact_rule_version(session) -> None:
+    from app.services.classification_rule_catalog import ClassificationRuleCatalogService
+
+    rule_doc = {
+        "version": "bind-rule-version",
+        "rules": [
+            {
+                "id": "rule_phone",
+                "target": "column",
+                "when": {"name_exact": ["phone"]},
+                "tag": "PII.Phone",
+                "auto_apply": True,
+            }
+        ],
+    }
+    active_rule, _created, _activated = ClassificationRuleCatalogService(session).import_json(
+        json.dumps(rule_doc).encode(),
+        filename="rules-bind.json",
+        actor_id="admin",
+        actor_name="Admin",
+        activate=True,
+    )
+
+    mock_om_client = MagicMock(spec=OpenMetadataClient, unsafe=True)
+    mock_om_client.get_entity.return_value = {
+        "name": "customer",
+        "columns": [{"name": "phone", "dataType": "VARCHAR"}],
+    }
+    mock_om_client.apply_confirmed_tags.return_value = {"entity": {}, "columns": {}}
+    mock_om_client.assert_confirmed_tags.return_value = None
+
+    with patch("app.tasks.classification.OpenMetadataClient", return_value=mock_om_client), \
+         patch("app.tasks.classification.SessionLocal", return_value=session):
+        result = classify_entity(
+            event_id="evt-bind-rule",
+            entity_type="table",
+            entity_fqn="trino_prod.analytics.customer",
+        )
+
+    execution = session.query(ClassificationExecution).one()
+    assert result["rule_version_id"] == str(active_rule.id)
+    assert execution.rule_version_id == str(active_rule.id)
+
+
+def test_generation_stale_guard_prevents_authoritative_write(session) -> None:
+    from app.repositories.classification_execution import ClassificationExecutionRepository
+    from app.services.classification_rule_catalog import ClassificationRuleCatalogService
+
+    rule_doc = {
+        "version": "stale-generation",
+        "rules": [
+            {
+                "id": "rule_phone",
+                "target": "column",
+                "when": {"name_exact": ["phone"]},
+                "tag": "PII.Phone",
+                "auto_apply": True,
+            }
+        ],
+    }
+    ClassificationRuleCatalogService(session).import_json(
+        json.dumps(rule_doc).encode(),
+        filename="rules-stale-generation.json",
+        actor_id="admin",
+        actor_name="Admin",
+        activate=True,
+    )
+
+    mock_om_client = MagicMock(spec=OpenMetadataClient, unsafe=True)
+    mock_om_client.get_entity.return_value = {
+        "name": "customer",
+        "columns": [{"name": "phone", "dataType": "VARCHAR"}],
+    }
+
+    def supersede_generation(_tags: list[str]) -> None:
+        ClassificationExecutionRepository(session).create_next_generation(
+            event_id="evt-newer-generation",
+            entity_type="table",
+            entity_fqn="trino_prod.analytics.customer",
+            status="EVALUATING",
+        )
+
+    mock_om_client.validate_tag_fqns.side_effect = supersede_generation
+
+    with patch("app.tasks.classification.OpenMetadataClient", return_value=mock_om_client), \
+         patch("app.tasks.classification.SessionLocal", return_value=session):
+        result = classify_entity(
+            event_id="evt-stale-generation",
+            entity_type="table",
+            entity_fqn="trino_prod.analytics.customer",
+        )
+
+    assert result["status"] == "SUPERSEDED"
+    assert result["reason"] == "generation_not_current"
+    mock_om_client.apply_confirmed_tags.assert_not_called()
+
+
+def test_rule_version_change_prevents_stale_authoritative_write(session) -> None:
+    from app.services.classification_rule_catalog import ClassificationRuleCatalogService
+
+    catalog = ClassificationRuleCatalogService(session)
+    rule_v1 = {
+        "version": "rule-v1",
+        "rules": [
+            {
+                "id": "rule_phone",
+                "target": "column",
+                "when": {"name_exact": ["phone"]},
+                "tag": "PII.Phone",
+                "auto_apply": True,
+            }
+        ],
+    }
+    rule_v2 = {
+        "version": "rule-v2",
+        "rules": [
+            {
+                "id": "rule_email",
+                "target": "column",
+                "when": {"name_exact": ["email"]},
+                "tag": "PII.Email",
+                "auto_apply": True,
+            }
+        ],
+    }
+    catalog.import_json(
+        json.dumps(rule_v1).encode(),
+        filename="rules-v1.json",
+        actor_id="admin",
+        actor_name="Admin",
+        activate=True,
+    )
+
+    mock_om_client = MagicMock(spec=OpenMetadataClient, unsafe=True)
+    mock_om_client.get_entity.return_value = {
+        "name": "customer",
+        "columns": [{"name": "phone", "dataType": "VARCHAR"}],
+    }
+
+    def activate_new_rule(_tags: list[str]) -> None:
+        catalog.import_json(
+            json.dumps(rule_v2).encode(),
+            filename="rules-v2.json",
+            actor_id="admin",
+            actor_name="Admin",
+            activate=True,
+        )
+
+    mock_om_client.validate_tag_fqns.side_effect = activate_new_rule
+
+    with patch("app.tasks.classification.OpenMetadataClient", return_value=mock_om_client), \
+         patch("app.tasks.classification.SessionLocal", return_value=session):
+        result = classify_entity(
+            event_id="evt-stale-rule",
+            entity_type="table",
+            entity_fqn="trino_prod.analytics.customer",
+        )
+
+    assert result["status"] == "SUPERSEDED"
+    assert result["reason"] == "rule_version_not_active"
+    mock_om_client.apply_confirmed_tags.assert_not_called()
+
+
+def test_duplicate_classify_task_delivery_reuses_logical_execution(session) -> None:
+    from app.services.classification_rule_catalog import ClassificationRuleCatalogService
+
+    rule_doc = {
+        "version": "duplicate-event",
+        "rules": [
+            {
+                "id": "rule_phone",
+                "target": "column",
+                "when": {"name_exact": ["phone"]},
+                "tag": "PII.Phone",
+                "auto_apply": True,
+            }
+        ],
+    }
+    ClassificationRuleCatalogService(session).import_json(
+        json.dumps(rule_doc).encode(),
+        filename="rules-duplicate.json",
+        actor_id="admin",
+        actor_name="Admin",
+        activate=True,
+    )
+    mock_om_client = MagicMock(spec=OpenMetadataClient, unsafe=True)
+    mock_om_client.get_entity.return_value = {
+        "name": "customer",
+        "columns": [{"name": "phone", "dataType": "VARCHAR"}],
+    }
+    mock_om_client.apply_confirmed_tags.return_value = {"entity": {}, "columns": {}}
+    mock_om_client.assert_confirmed_tags.return_value = None
+
+    with patch("app.tasks.classification.OpenMetadataClient", return_value=mock_om_client), \
+         patch("app.tasks.classification.SessionLocal", return_value=session):
+        first = classify_entity(
+            event_id="evt-duplicate",
+            entity_type="table",
+            entity_fqn="trino_prod.analytics.customer",
+        )
+        second = classify_entity(
+            event_id="evt-duplicate",
+            entity_type="table",
+            entity_fqn="trino_prod.analytics.customer",
+        )
+
+    assert first["execution_id"] == second["execution_id"]
+    assert second["duplicate"] is True
+    assert session.query(ClassificationExecution).count() == 1
+    assert mock_om_client.apply_confirmed_tags.call_count == 1
+
+
+def test_different_event_for_same_entity_creates_next_generation(session) -> None:
+    from app.services.classification_rule_catalog import ClassificationRuleCatalogService
+
+    rule_doc = {
+        "version": "different-event",
+        "rules": [
+            {
+                "id": "rule_phone",
+                "target": "column",
+                "when": {"name_exact": ["phone"]},
+                "tag": "PII.Phone",
+                "auto_apply": True,
+            }
+        ],
+    }
+    ClassificationRuleCatalogService(session).import_json(
+        json.dumps(rule_doc).encode(),
+        filename="rules-different-event.json",
+        actor_id="admin",
+        actor_name="Admin",
+        activate=True,
+    )
+    mock_om_client = MagicMock(spec=OpenMetadataClient, unsafe=True)
+    mock_om_client.get_entity.return_value = {
+        "name": "customer",
+        "columns": [{"name": "phone", "dataType": "VARCHAR"}],
+    }
+    mock_om_client.apply_confirmed_tags.return_value = {"entity": {}, "columns": {}}
+    mock_om_client.assert_confirmed_tags.return_value = None
+
+    with patch("app.tasks.classification.OpenMetadataClient", return_value=mock_om_client), \
+         patch("app.tasks.classification.SessionLocal", return_value=session):
+        first = classify_entity(
+            event_id="evt-generation-1",
+            entity_type="table",
+            entity_fqn="trino_prod.analytics.customer",
+        )
+        second = classify_entity(
+            event_id="evt-generation-2",
+            entity_type="table",
+            entity_fqn="trino_prod.analytics.customer",
+        )
+
+    assert second["generation"] == first["generation"] + 1
+    assert session.query(ClassificationExecution).count() == 2
 
 
 # -----------------------------------------------------------------------------

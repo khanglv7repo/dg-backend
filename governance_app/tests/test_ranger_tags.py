@@ -162,16 +162,25 @@ def test_tag_store_does_not_treat_matching_unmanaged_resource_as_owned() -> None
     ]
 
     def handler(request: httpx.Request) -> httpx.Response:
-        requests.append((request.method, request.url.path))
+        requests.append((request.method, request.url.path, dict(request.url.params)))
         if request.method == "GET" and "/resources/service/" in request.url.path:
             return httpx.Response(200, json=resources)
         if request.method == "GET" and request.url.path.endswith("/tags"):
             return httpx.Response(200, json=tags)
         if request.method == "GET" and request.url.path.endswith("/tagresourcemaps"):
             return httpx.Response(200, json=maps)
-        if request.method == "DELETE" and request.url.path.endswith("/tagresourcemaps/40"):
+        if (
+            request.method == "DELETE"
+            and request.url.path.endswith("/tagresourcemaps")
+            and request.url.params.get("resource-guid") == "managed-resource"
+            and request.url.params.get("tag-guid") == "tag-email"
+        ):
             return httpx.Response(204)
-        if request.method == "DELETE" and request.url.path.endswith("/tagresourcemaps/41"):
+        if (
+            request.method == "DELETE"
+            and request.url.path.endswith("/tagresourcemaps")
+            and request.url.params.get("resource-guid") == "unmanaged-resource"
+        ):
             return httpx.Response(500, json={"error": "must not delete unmanaged"})
         return httpx.Response(500, json={"unexpected": str(request.url)})
 
@@ -198,4 +207,9 @@ def test_tag_store_does_not_treat_matching_unmanaged_resource_as_owned() -> None
             "map_id": "40",
         }
     ]
-    assert ("DELETE", "/service/tags/tagresourcemaps/41") not in requests
+    assert not any(
+        method == "DELETE"
+        and path.endswith("/tagresourcemaps")
+        and query.get("resource-guid") == "unmanaged-resource"
+        for method, path, query in requests
+    )

@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from app.clients.openmetadata import OpenMetadataClient
+from app.repositories.classification_rule_versions import ClassificationRuleVersionRepository
 from app.repositories.event_inbox import EventInboxRepository
 from app.schemas.classification import MatchOutcome
 from app.services.event_router import EventPurpose, EventPurposeRouter
@@ -112,7 +113,47 @@ def test_sync_tags_to_ranger_uses_correct_queue() -> None:
     assert sync_tags_to_ranger.queue == "ranger.tag-sync"
 
 
-def test_deterministic_match_writes_confirmed_tag_directly_without_suggestion() -> None:
+def _activate_rule_version(session, document: dict) -> None:
+    repo = ClassificationRuleVersionRepository(session)
+    record = repo.create(
+        payload=document,
+        checksum=f"checksum-{document['version']}",
+        declared_version=document["version"],
+        created_by="test-suite",
+    )
+    repo.activate(record.id)
+    session.commit()
+
+
+class _SessionContext:
+    def __init__(self, session):
+        self.session = session
+
+    def __enter__(self):
+        return self.session
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+
+def test_deterministic_match_writes_confirmed_tag_directly_without_suggestion(session) -> None:
+    _activate_rule_version(
+        session,
+        {
+            "version": "task-direct-match",
+            "rules": [
+                {
+                    "id": "phone-exact",
+                    "target": "column",
+                    "when": {"name_exact": ["phone_number"]},
+                    "tag": "PII.Phone",
+                    "confidence": 1.0,
+                    "auto_apply": True,
+                }
+            ],
+        },
+    )
+
     mock_om_client = MagicMock(spec=OpenMetadataClient, unsafe=True)
     mock_om_client.get_entity.return_value = {
         "name": "customer",
@@ -120,25 +161,10 @@ def test_deterministic_match_writes_confirmed_tag_directly_without_suggestion() 
         "columns": [{"name": "phone_number", "dataType": "VARCHAR", "description": "customer phone number"}],
     }
 
-    mock_eval_result = MagicMock()
-    mock_eval_result.outcome = MatchOutcome.EXACT
-    mock_sugg = MagicMock()
-    mock_sugg.field_path = "columns.phone_number"
-    mock_sugg.tag = "PII.Phone"
-    mock_sugg.model_dump.return_value = {"field_path": "columns.phone_number", "tag": "PII.Phone"}
-    mock_eval_result.suggestions = [mock_sugg]
-    mock_eval_result.evidence = {"rule": "phone_rule"}
-
-    mock_engine = MagicMock()
-    mock_engine.evaluate.return_value = mock_eval_result
-
     with patch("app.tasks.classification.OpenMetadataClient", return_value=mock_om_client), \
-         patch("app.tasks.classification.ClassificationRuleCatalogService") as mock_catalog, \
          patch("app.tasks.classification.SessionLocal") as mock_session_local:
 
-        mock_session = MagicMock()
-        mock_session_local.return_value.__enter__.return_value = mock_session
-        mock_catalog.return_value.active_engine.return_value = mock_engine
+        mock_session_local.return_value = _SessionContext(session)
 
         result = classify_entity(
             event_id="evt-match-1",
@@ -156,30 +182,53 @@ def test_deterministic_match_writes_confirmed_tag_directly_without_suggestion() 
         mock_om_client.create_tag_suggestion.assert_not_called()
 
 
-def test_ai_fallback_outcomes_transition_to_waiting_ai() -> None:
+def test_ai_fallback_outcomes_transition_to_waiting_ai(session) -> None:
     for outcome in (MatchOutcome.NO_MATCH, MatchOutcome.AMBIGUOUS):
+        document = {
+            "version": f"task-{outcome.value}",
+            "rules": [
+                {
+                    "id": "email-exact",
+                    "target": "column",
+                    "when": {"name_exact": ["email"]},
+                    "tag": "PII.Email",
+                    "confidence": 1.0,
+                    "auto_apply": True,
+                }
+            ],
+        }
+        if outcome == MatchOutcome.AMBIGUOUS:
+            document["rules"] = [
+                {
+                    "id": "id-sensitive",
+                    "target": "column",
+                    "when": {"name_exact": ["id"]},
+                    "tag": "PII.CustomerID",
+                    "confidence": 0.9,
+                    "auto_apply": True,
+                },
+                {
+                    "id": "id-financial",
+                    "target": "column",
+                    "when": {"name_exact": ["id"]},
+                    "tag": "Financial.AccountID",
+                    "confidence": 0.9,
+                    "auto_apply": True,
+                },
+            ]
+        _activate_rule_version(session, document)
+
         mock_om_client = MagicMock(spec=OpenMetadataClient, unsafe=True)
         mock_om_client.get_entity.return_value = {
             "name": "customer",
             "columns": [{"name": "id", "dataType": "INT"}],
         }
 
-        mock_eval_result = MagicMock()
-        mock_eval_result.outcome = outcome
-        mock_eval_result.suggestions = []
-        mock_eval_result.evidence = {}
-
-        mock_engine = MagicMock()
-        mock_engine.evaluate.return_value = mock_eval_result
-
         with patch("app.tasks.classification.OpenMetadataClient", return_value=mock_om_client), \
-             patch("app.tasks.classification.ClassificationRuleCatalogService") as mock_catalog, \
              patch("app.tasks.classification.ai_classify_entity") as mock_ai_task, \
              patch("app.tasks.classification.SessionLocal") as mock_session_local:
 
-            mock_session = MagicMock()
-            mock_session_local.return_value.__enter__.return_value = mock_session
-            mock_catalog.return_value.active_engine.return_value = mock_engine
+            mock_session_local.return_value = _SessionContext(session)
 
             result = classify_entity(
                 event_id=f"evt-{outcome.value}-1",

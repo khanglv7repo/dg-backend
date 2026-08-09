@@ -15,6 +15,7 @@ from app.db.session import SessionLocal
 from app.schemas.classification import MatchOutcome
 from app.repositories.audit import AuditRepository
 from app.repositories.classification_execution import ClassificationExecutionRepository
+from app.rules.classification import ClassificationRuleEngine
 from app.schemas.events import MetadataEventRequest, MetadataField
 from app.services.classification_rule_catalog import ClassificationRuleCatalogService
 
@@ -50,7 +51,9 @@ def classify_entity(
     om_client = OpenMetadataClient(
         base_url=settings.openmetadata_base_url,
         token=(
-            settings.openmetadata_execution_bot_token.get_secret_value()
+            settings.openmetadata_auto_tag_bot_token.get_secret_value()
+            if settings.openmetadata_auto_tag_bot_token
+            else settings.openmetadata_execution_bot_token.get_secret_value()
             if settings.openmetadata_execution_bot_token
             else None
         ),
@@ -61,16 +64,41 @@ def classify_entity(
         exec_repo = ClassificationExecutionRepository(session)
         audit_repo = AuditRepository(session)
 
-        # Create EVALUATING execution record with next generation N+1 (supersedes older unfinished runs)
-        execution = exec_repo.create_next_generation(
-            event_id=event_id,
-            entity_type=entity_type,
-            entity_fqn=entity_fqn,
-            status="EVALUATING",
-            correlation_id=correlation_id,
-        )
-
         try:
+            catalog_service = ClassificationRuleCatalogService(session)
+            active_rule_version = catalog_service.version_repo.get_active()
+            if active_rule_version is None:
+                active_rule_version = catalog_service.get_active()
+
+            rule_version_id = str(active_rule_version.id)
+            rule_document = getattr(active_rule_version, "payload", None) or getattr(
+                active_rule_version,
+                "document",
+                None,
+            )
+            captured_authoritative_rule_version = (
+                getattr(active_rule_version, "payload", None) is not None
+            )
+            engine = ClassificationRuleEngine(rule_document)
+
+            # Create or reuse one logical execution per OM event/entity.
+            execution, created = exec_repo.get_or_create_next_generation(
+                event_id=event_id,
+                entity_type=entity_type,
+                entity_fqn=entity_fqn,
+                status="EVALUATING",
+                rule_version_id=rule_version_id,
+                correlation_id=correlation_id,
+            )
+            if not created:
+                return {
+                    "status": execution.status,
+                    "outcome": execution.outcome,
+                    "execution_id": str(execution.id),
+                    "generation": execution.generation,
+                    "duplicate": True,
+                }
+
             # 1. Re-read latest OpenMetadata entity state (Latest-state rule)
             latest_entity = om_client.get_entity(
                 entity_type=entity_type,
@@ -93,9 +121,7 @@ def classify_entity(
                 correlation_id=correlation_id,
             )
 
-            # 2. Evaluate active rule engine
-            catalog_service = ClassificationRuleCatalogService(session)
-            engine = catalog_service.active_engine()
+            # 2. Evaluate the captured immutable active rule version.
             eval_result = engine.evaluate(normalized_event)
 
             outcome_str = eval_result.outcome.value
@@ -117,6 +143,51 @@ def classify_entity(
 
                 # Validate tags exist in OpenMetadata taxonomy
                 om_client.validate_tag_fqns(list(all_tags))
+
+                if not exec_repo.is_current_generation(execution.id, execution.generation):
+                    exec_repo.update_status(
+                        execution.id,
+                        status="SUPERSEDED",
+                        outcome="MATCH",
+                        suggestions=[s.model_dump(mode="json") for s in eval_result.suggestions],
+                        evidence={
+                            **eval_result.evidence,
+                            "stale_reason": "generation_not_current",
+                        },
+                    )
+                    session.commit()
+                    return {
+                        "status": "SUPERSEDED",
+                        "outcome": "MATCH",
+                        "execution_id": str(execution.id),
+                        "generation": execution.generation,
+                        "reason": "generation_not_current",
+                    }
+
+                if (
+                    captured_authoritative_rule_version
+                    and not catalog_service.version_repo.is_active(rule_version_id)
+                ):
+                    exec_repo.update_status(
+                        execution.id,
+                        status="SUPERSEDED",
+                        outcome="MATCH",
+                        suggestions=[s.model_dump(mode="json") for s in eval_result.suggestions],
+                        evidence={
+                            **eval_result.evidence,
+                            "stale_reason": "rule_version_not_active",
+                            "captured_rule_version_id": rule_version_id,
+                        },
+                    )
+                    session.commit()
+                    return {
+                        "status": "SUPERSEDED",
+                        "outcome": "MATCH",
+                        "execution_id": str(execution.id),
+                        "generation": execution.generation,
+                        "rule_version_id": rule_version_id,
+                        "reason": "rule_version_not_active",
+                    }
 
                 # Apply Confirmed tags directly
                 observed = om_client.apply_confirmed_tags(
@@ -163,6 +234,8 @@ def classify_entity(
                     "status": "COMPLETED",
                     "outcome": "MATCH",
                     "execution_id": str(execution.id),
+                    "generation": execution.generation,
+                    "rule_version_id": rule_version_id,
                 }
 
             else:
@@ -201,6 +274,7 @@ def classify_entity(
                     "outcome": outcome_str,
                     "execution_id": str(execution.id),
                     "generation": execution.generation,
+                    "rule_version_id": rule_version_id,
                 }
 
         except Exception as exc:

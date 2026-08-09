@@ -59,3 +59,24 @@ def test_generation_unique_constraint_rejects_duplicate_generation(session) -> N
         session.rollback()
 
     assert session.query(ClassificationExecution).count() == 0
+
+
+def test_duplicate_event_entity_unique_constraint_rejects_second_execution(session) -> None:
+    repo = ClassificationExecutionRepository(session)
+    repo.create(
+        event_id="evt-same",
+        entity_type="table",
+        entity_fqn="sales.customers",
+        generation=1,
+    )
+
+    try:
+        repo.create(
+            event_id="evt-same",
+            entity_type="table",
+            entity_fqn="sales.customers",
+            generation=2,
+        )
+        assert False, "Duplicate event/entity must violate the idempotency fence"
+    except IntegrityError:
+        session.rollback()

@@ -20,12 +20,17 @@ class ClassificationExecution(Base):
             "generation",
             name="uq_classification_execution_entity_generation",
         ),
+        UniqueConstraint(
+            "idempotency_key",
+            name="uq_classification_execution_idempotency_key",
+        ),
         Index("ix_classification_executions_entity", "entity_fqn", "created_at"),
         Index("ix_classification_executions_status", "status", "created_at"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID_TYPE, primary_key=True, default=uuid.uuid4)
     event_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    idempotency_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
     entity_type: Mapped[str] = mapped_column(String(64), nullable=False)
     entity_fqn: Mapped[str] = mapped_column(String(1024), nullable=False)
     generation: Mapped[int] = mapped_column(Integer, nullable=False, default=1)

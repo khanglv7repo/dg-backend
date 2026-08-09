@@ -29,6 +29,7 @@ class RangerTagSyncReconciliationService:
     def synchronize_full_snapshot(self) -> dict[str, Any]:
         snapshots = self.om_client.list_confirmed_table_tag_snapshots()
         desired = self._desired_service_state(snapshots)
+        resource_scope = self._desired_resource_scope(desired)
         checksum = self._checksum(desired)
 
         if getattr(self.tag_store, "dry_run", False):
@@ -44,7 +45,9 @@ class RangerTagSyncReconciliationService:
             actual_after: set[tuple[str, str, str]] = desired
             removed: list[dict[str, str]] = []
         else:
-            actual_before = self.tag_store.read_actual_service_state()
+            actual_before = self.tag_store.read_actual_service_state(
+                resource_scope=resource_scope,
+            )
             if not self.tag_store.compare_service_state(desired, actual_before):
                 per_entity_results = []
                 for snapshot in snapshots:
@@ -57,12 +60,15 @@ class RangerTagSyncReconciliationService:
                     )
                 removed = self.tag_store.remove_stale_service_assignments(
                     expected=desired,
+                    resource_scope=resource_scope,
                 )
             else:
                 per_entity_results = []
                 removed = []
 
-            actual_after = self.tag_store.read_actual_service_state()
+            actual_after = self.tag_store.read_actual_service_state(
+                resource_scope=resource_scope,
+            )
         if not self.tag_store.compare_service_state(desired, actual_after):
             raise ExternalSystemError(
                 "Ranger tag store failed full-snapshot read-back convergence verification",
@@ -107,6 +113,12 @@ class RangerTagSyncReconciliationService:
                 for tag in tags:
                     desired.add((entity_fqn, str(field_path), str(tag)))
         return desired
+
+    @staticmethod
+    def _desired_resource_scope(
+        desired: set[tuple[str, str, str]],
+    ) -> set[tuple[str, str]]:
+        return {(entity_fqn, field_path) for entity_fqn, field_path, _ in desired}
 
     @staticmethod
     def _checksum(desired: set[tuple[str, str, str]]) -> str:

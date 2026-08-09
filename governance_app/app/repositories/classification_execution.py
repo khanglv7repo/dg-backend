@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import uuid
+from hashlib import sha256
 from typing import Any
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
@@ -18,6 +19,32 @@ class ClassificationExecutionRepository:
         if isinstance(execution_id, str):
             execution_id = uuid.UUID(execution_id)
         return self.session.get(ClassificationExecution, execution_id)
+
+    def get_by_event_entity(
+        self,
+        *,
+        event_id: str,
+        entity_fqn: str,
+    ) -> ClassificationExecution | None:
+        idempotency_key = self._idempotency_key(event_id, entity_fqn)
+        return (
+            self.session.query(ClassificationExecution)
+            .filter(
+                (
+                    ClassificationExecution.idempotency_key == idempotency_key
+                )
+                | (
+                    (ClassificationExecution.idempotency_key.is_(None))
+                    & (ClassificationExecution.event_id == event_id)
+                    & (ClassificationExecution.entity_fqn == entity_fqn)
+                ),
+            )
+            .first()
+        )
+
+    @staticmethod
+    def _idempotency_key(event_id: str, entity_fqn: str) -> str:
+        return sha256(f"{event_id}\x00{entity_fqn}".encode("utf-8")).hexdigest()
 
     def create(
         self,
@@ -36,6 +63,7 @@ class ClassificationExecutionRepository:
     ) -> ClassificationExecution:
         record = ClassificationExecution(
             event_id=event_id,
+            idempotency_key=self._idempotency_key(event_id, entity_fqn),
             entity_type=entity_type,
             entity_fqn=entity_fqn,
             generation=generation,
@@ -66,6 +94,42 @@ class ClassificationExecutionRepository:
         correlation_id: str | None = None,
     ) -> ClassificationExecution:
         """Create next generation N+1 and mark older unfinished runs SUPERSEDED."""
+        record, _created = self.get_or_create_next_generation(
+            event_id=event_id,
+            entity_type=entity_type,
+            entity_fqn=entity_fqn,
+            status=status,
+            outcome=outcome,
+            rule_version_id=rule_version_id,
+            suggestions=suggestions,
+            evidence=evidence,
+            confidence=confidence,
+            correlation_id=correlation_id,
+        )
+        return record
+
+    def get_or_create_next_generation(
+        self,
+        *,
+        event_id: str,
+        entity_type: str,
+        entity_fqn: str,
+        status: str = "EVALUATING",
+        outcome: str | None = None,
+        rule_version_id: str | None = None,
+        suggestions: list[dict[str, Any]] | None = None,
+        evidence: dict[str, Any] | None = None,
+        confidence: float | None = None,
+        correlation_id: str | None = None,
+    ) -> tuple[ClassificationExecution, bool]:
+        """Return one logical execution for event/entity or create next generation."""
+        existing = self.get_by_event_entity(
+            event_id=event_id,
+            entity_fqn=entity_fqn,
+        )
+        if existing is not None:
+            return existing, False
+
         for _attempt in range(3):
             raw_max = (
                 self.session.query(func.max(ClassificationExecution.generation))
@@ -102,9 +166,15 @@ class ClassificationExecutionRepository:
                     evidence=evidence,
                     confidence=confidence,
                     correlation_id=correlation_id,
-                )
+                ), True
             except IntegrityError:
                 self.session.rollback()
+                existing = self.get_by_event_entity(
+                    event_id=event_id,
+                    entity_fqn=entity_fqn,
+                )
+                if existing is not None:
+                    return existing, False
 
         raise RuntimeError(
             f"could not create unique classification generation for {entity_fqn}"
