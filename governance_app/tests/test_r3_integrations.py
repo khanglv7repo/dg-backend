@@ -435,6 +435,135 @@ def test_integration_c_ai_fallback_handoff(session) -> None:
         )
 
 
+def test_waiting_ai_duplicate_republishes_existing_ai_handoff(session) -> None:
+    from app.services.classification_rule_catalog import ClassificationRuleCatalogService
+
+    rule_doc = {
+        "version": "waiting-ai-republish",
+        "rules": [
+            {
+                "id": "rule_unused",
+                "target": "column",
+                "when": {"name_exact": ["unused_column_name"]},
+                "tag": "PII.Email",
+                "auto_apply": True,
+            }
+        ],
+    }
+    ClassificationRuleCatalogService(session).import_json(
+        json.dumps(rule_doc).encode(),
+        filename="rules-waiting-ai-republish.json",
+        actor_id="admin",
+        actor_name="Admin",
+        activate=True,
+    )
+
+    mock_om_client = MagicMock(spec=OpenMetadataClient, unsafe=True)
+    mock_om_client.get_entity.return_value = {
+        "name": "raw_logs",
+        "columns": [{"name": "log_id", "dataType": "BIGINT"}],
+    }
+    successful_publish = MagicMock()
+    successful_publish.id = "ai-task-republished"
+
+    with patch("app.tasks.classification.OpenMetadataClient", return_value=mock_om_client), \
+         patch("app.tasks.classification.ai_classify_entity") as mock_ai_task, \
+         patch("app.tasks.classification.SessionLocal", return_value=session):
+        mock_ai_task.delay.side_effect = [
+            RuntimeError("broker publish failed"),
+            successful_publish,
+        ]
+
+        with pytest.raises(Exception):
+            classify_entity(
+                event_id="evt-waiting-ai-republish",
+                entity_type="table",
+                entity_fqn="trino_prod.raw.logs",
+            )
+
+        existing = session.query(ClassificationExecution).one()
+        assert existing.status == "WAITING_AI"
+        assert existing.outcome == "NO_MATCH"
+
+        duplicate = classify_entity(
+            event_id="evt-waiting-ai-republish",
+            entity_type="table",
+            entity_fqn="trino_prod.raw.logs",
+        )
+
+    assert duplicate["duplicate"] is True
+    assert duplicate["status"] == "WAITING_AI"
+    assert duplicate["execution_id"] == str(existing.id)
+    assert duplicate["generation"] == existing.generation
+    assert duplicate["ai_handoff_republished"] is True
+    assert session.query(ClassificationExecution).count() == 1
+    assert session.query(ClassificationExecution).one().status == "WAITING_AI"
+    assert session.query(ClassificationExecution).one().generation == existing.generation
+    assert mock_ai_task.delay.call_count == 2
+    mock_ai_task.delay.assert_called_with(
+        execution_id=str(existing.id),
+        generation=existing.generation,
+    )
+    assert mock_om_client.apply_confirmed_tags.call_count == 0
+
+
+def test_completed_duplicate_does_not_republish_ai_handoff(session) -> None:
+    from app.repositories.classification_execution import ClassificationExecutionRepository
+    from app.services.classification_rule_catalog import ClassificationRuleCatalogService
+
+    rule_doc = {
+        "version": "completed-duplicate",
+        "rules": [
+            {
+                "id": "rule_unused",
+                "target": "column",
+                "when": {"name_exact": ["unused_column_name"]},
+                "tag": "PII.Email",
+                "auto_apply": True,
+            }
+        ],
+    }
+    ClassificationRuleCatalogService(session).import_json(
+        json.dumps(rule_doc).encode(),
+        filename="rules-completed-duplicate.json",
+        actor_id="admin",
+        actor_name="Admin",
+        activate=True,
+    )
+    existing = ClassificationExecutionRepository(session).create(
+        event_id="evt-completed-duplicate",
+        entity_type="table",
+        entity_fqn="trino_prod.raw.logs",
+        generation=1,
+        status="COMPLETED",
+        outcome="MATCH",
+    )
+    session.commit()
+
+    mock_om_client = MagicMock(spec=OpenMetadataClient, unsafe=True)
+    with patch("app.tasks.classification.OpenMetadataClient", return_value=mock_om_client), \
+         patch("app.tasks.classification.ai_classify_entity") as mock_ai_task, \
+         patch("app.tasks.classification.SessionLocal", return_value=session):
+
+        duplicate = classify_entity(
+            event_id="evt-completed-duplicate",
+            entity_type="table",
+            entity_fqn="trino_prod.raw.logs",
+        )
+
+    assert duplicate == {
+        "status": "COMPLETED",
+        "outcome": "MATCH",
+        "execution_id": str(existing.id),
+        "generation": 1,
+        "duplicate": True,
+        "ai_handoff_republished": False,
+    }
+    assert session.query(ClassificationExecution).count() == 1
+    mock_ai_task.delay.assert_not_called()
+    mock_om_client.get_entity.assert_not_called()
+
+
 # -----------------------------------------------------------------------------
 # Integration D — OM -> Ranger TAG_SYNC, Apply & Post-Apply Read-Back Verification
 # -----------------------------------------------------------------------------

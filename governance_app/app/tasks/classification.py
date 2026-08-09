@@ -91,12 +91,20 @@ def classify_entity(
                 correlation_id=correlation_id,
             )
             if not created:
+                ai_handoff_republished = False
+                if execution.status == "WAITING_AI":
+                    ai_classify_entity.delay(
+                        execution_id=str(execution.id),
+                        generation=execution.generation,
+                    )
+                    ai_handoff_republished = True
                 return {
                     "status": execution.status,
                     "outcome": execution.outcome,
                     "execution_id": str(execution.id),
                     "generation": execution.generation,
                     "duplicate": True,
+                    "ai_handoff_republished": ai_handoff_republished,
                 }
 
             # 1. Re-read latest OpenMetadata entity state (Latest-state rule)
