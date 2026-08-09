@@ -30,7 +30,13 @@ app.conf.update(
     task_queues={
         "default": {},
         "ranger.tag-sync": {},
+        "ranger.policy-sync": {},
         "ai.classification": {},
+    },
+    task_routes={
+        "app.tasks.policy_sync.sync_policy_to_ranger": {
+            "queue": "ranger.policy-sync"
+        },
     },
     worker_concurrency=4,
     beat_schedule={

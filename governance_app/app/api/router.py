@@ -5,6 +5,7 @@ from app.api.routes import (
     classification_rules,
     classification_runs,
     classifications,
+    data_access_policies,
     events,
     health,
     jobs,
@@ -48,10 +49,18 @@ api_router.include_router(
     prefix="/classification-runs",
     tags=["classification-runs"],
 )
+# R4 authoritative logical policy API. The legacy /policies native-Ranger JSON
+# catalog remains below for compatibility but is not an R4 source of truth.
+api_router.include_router(
+    data_access_policies.router,
+    prefix="/data-access-policies",
+    tags=["data-access-policies"],
+)
 api_router.include_router(
     policies.router,
     prefix="/policies",
     tags=["policies"],
+    deprecated=True,
 )
 api_router.include_router(
     jobs.router,
