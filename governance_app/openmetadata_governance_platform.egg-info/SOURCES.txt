@@ -1,6 +1,7 @@
 README.md
 pyproject.toml
 app/__init__.py
+app/celery_app.py
 app/main.py
 app/api/__init__.py
 app/api/dependencies.py
@@ -70,6 +71,12 @@ app/services/openmetadata_event_adapter.py
 app/services/openmetadata_governance.py
 app/services/policy_catalog.py
 app/services/policy_sync.py
+app/tasks/__init__.py
+app/tasks/classification.py
+app/tasks/ingestion.py
+app/tasks/policy_sync.py
+app/tasks/recovery.py
+app/tasks/tag_sync.py
 app/workers/__init__.py
 app/workers/base.py
 app/workers/execution_worker.py
