@@ -10,6 +10,9 @@ from app.repositories.audit import AuditRepository
 from app.repositories.classification_rule_sets import (
     ClassificationRuleSetRepository,
 )
+from app.repositories.classification_rule_versions import (
+    ClassificationRuleVersionRepository,
+)
 from app.rules.classification import ClassificationRuleEngine
 
 
@@ -17,10 +20,10 @@ MAX_CLASSIFICATION_RULE_FILE_BYTES = 2 * 1024 * 1024
 
 
 class ClassificationRuleCatalogService:
-    """DB-backed classification rule-set catalog.
+    """DB-backed classification rule catalog powered by authoritative classification_rule_versions.
 
     JSON files are import transport only. PostgreSQL owns the runtime active
-    rule set used by classification.
+    rule version used by classification.
     """
 
     def __init__(
@@ -28,32 +31,29 @@ class ClassificationRuleCatalogService:
         session: Session,
     ) -> None:
         self.session = session
-        self.repository = (
-            ClassificationRuleSetRepository(
-                session
-            )
-        )
+        self.version_repo = ClassificationRuleVersionRepository(session)
+        self.legacy_repo = ClassificationRuleSetRepository(session)
         self.audit = AuditRepository(session)
 
-    def list_rule_sets(self):
-        return self.repository.list_all()
-
     def get_active(self):
-        active = self.repository.get_active()
-        if active is None:
+        active_ver = self.version_repo.get_active()
+        if active_ver is not None:
+            return active_ver
+
+        active_legacy = self.legacy_repo.get_active()
+        if active_legacy is None:
             raise ConfigurationError(
-                "no active classification rule set; "
+                "no active classification rule version; "
                 "import a JSON rule file first"
             )
-        return active
+        return active_legacy
 
     def active_engine(
         self,
     ) -> ClassificationRuleEngine:
         active = self.get_active()
-        return ClassificationRuleEngine(
-            active.document
-        )
+        doc = getattr(active, "payload", None) or getattr(active, "document", None)
+        return ClassificationRuleEngine(doc)
 
     def import_json(
         self,
@@ -101,14 +101,26 @@ class ClassificationRuleCatalogService:
             canonical.encode("utf-8")
         ).hexdigest()
 
-        record = self.repository.get_by_sha256(
-            name="default",
-            document_sha256=document_sha256,
-        )
-        created = record is None
+        ver_record = self.version_repo.get_by_checksum("default", document_sha256)
+        created = ver_record is None
 
-        if record is None:
-            record = self.repository.create(
+        if ver_record is None:
+            ver_record = self.version_repo.create(
+                rule_key="default",
+                payload=engine.document,
+                checksum=document_sha256,
+                declared_version=engine.declared_version,
+                created_by=actor_id,
+            )
+
+        activated = False
+        if activate:
+            ver_record, activated = self.version_repo.activate(ver_record.id, "default")
+
+        # Also sync to legacy repo for backwards compatibility
+        legacy_rec = self.legacy_repo.get_by_sha256(name="default", document_sha256=document_sha256)
+        if legacy_rec is None:
+            legacy_rec = self.legacy_repo.create(
                 name="default",
                 declared_version=engine.declared_version,
                 document=engine.document,
@@ -116,40 +128,32 @@ class ClassificationRuleCatalogService:
                 created_by=actor_id,
                 created_by_name=actor_name,
             )
-
-        activated = False
         if activate:
-            record, activated = (
-                self.repository.activate(
-                    record.id
-                )
-            )
+            self.legacy_repo.activate(legacy_rec.id)
 
         self.audit.record(
             actor_id=actor_id,
             actor_name=actor_name,
             action=(
-                "CLASSIFICATION_RULE_SET_IMPORTED"
+                "CLASSIFICATION_RULE_VERSION_IMPORTED"
                 if created
-                else "CLASSIFICATION_RULE_SET_REIMPORT"
+                else "CLASSIFICATION_RULE_VERSION_REIMPORT"
             ),
-            object_type="classification_rule_set",
-            object_id=str(record.id),
+            object_type="classification_rule_version",
+            object_id=str(ver_record.id),
             correlation_id=correlation_id,
             details={
                 "filename": filename,
-                "declared_version":
-                    record.declared_version,
-                "document_sha256":
-                    record.document_sha256,
-                "rule_count":
-                    len(engine.rules),
+                "version": ver_record.version,
+                "declared_version": ver_record.declared_version,
+                "checksum": ver_record.checksum,
+                "rule_count": len(engine.rules),
                 "activated": activate,
-                "status": record.status,
+                "status": ver_record.status,
             },
         )
 
-        return record, created, activated
+        return ver_record, created, activated
 
     def activate(
         self,
@@ -159,27 +163,21 @@ class ClassificationRuleCatalogService:
         actor_name: str,
         correlation_id: str | None = None,
     ):
-        record, changed = (
-            self.repository.activate(
-                rule_set_id
-            )
-        )
+        record, changed = self.version_repo.activate(rule_set_id, "default")
         self.audit.record(
             actor_id=actor_id,
             actor_name=actor_name,
             action=(
-                "CLASSIFICATION_RULE_SET_ACTIVATED"
+                "CLASSIFICATION_RULE_VERSION_ACTIVATED"
                 if changed
-                else "CLASSIFICATION_RULE_SET_ALREADY_ACTIVE"
+                else "CLASSIFICATION_RULE_VERSION_ALREADY_ACTIVE"
             ),
-            object_type="classification_rule_set",
+            object_type="classification_rule_version",
             object_id=str(record.id),
             correlation_id=correlation_id,
             details={
-                "declared_version":
-                    record.declared_version,
-                "document_sha256":
-                    record.document_sha256,
+                "version": record.version,
+                "checksum": record.checksum,
             },
         )
         return record, changed

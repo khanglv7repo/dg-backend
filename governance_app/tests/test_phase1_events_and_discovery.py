@@ -43,8 +43,7 @@ def test_webhook_adapter_entity_created_event(session) -> None:
         mock_classify.delay.return_value.id = "task-c1"
         mock_tag_sync.delay.return_value.id = "task-t1"
 
-        with session.begin():
-            res = adapter.process_change_event(raw_event)
+        res = adapter.process_change_event(raw_event)
 
         assert res["status"] == "accepted"
         assert EventPurpose.CLASSIFY.value in res["purposes"]
@@ -81,10 +80,8 @@ def test_webhook_adapter_confirmed_tag_change(session) -> None:
          patch("app.services.openmetadata_event_adapter.sync_tags_to_ranger") as mock_tag_sync:
         mock_tag_sync.delay.return_value.id = "task-t2"
 
-        with session.begin():
-            res = adapter.process_change_event(raw_event)
+        res = adapter.process_change_event(raw_event)
 
-        # Tag-only change triggers TAG_SYNC, but MUST NOT reclassify to prevent loops!
         assert res["status"] == "accepted"
         assert res["purposes"] == [EventPurpose.TAG_SYNC.value]
         mock_classify.delay.assert_not_called()
@@ -97,18 +94,15 @@ def test_webhook_adapter_confirmed_tag_change(session) -> None:
 
 def test_watermark_repository(session) -> None:
     repo = IntegrationWatermarkRepository(session)
-    with session.begin():
-        val = repo.get("openmetadata", "asset_discovery_last_timestamp")
-        assert val is None
+    val = repo.get("openmetadata", "asset_discovery_last_timestamp")
+    assert val is None
 
-        repo.set("openmetadata", "asset_discovery_last_timestamp", "1700000000000")
-
+    repo.set("openmetadata", "asset_discovery_last_timestamp", "1700000000000")
     assert repo.get("openmetadata", "asset_discovery_last_timestamp") == "1700000000000"
 
 
 def test_asset_discovery_service_skips_when_disabled(session) -> None:
     settings = Settings(openmetadata_enabled=False)
     service = AssetDiscoveryService(session, settings)
-    with session.begin():
-        res = service.discover()
+    res = service.discover()
     assert res["status"] == "SKIPPED"

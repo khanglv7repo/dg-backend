@@ -29,17 +29,20 @@ class EventPurposeRouter:
 
     @classmethod
     def route(cls, event_data: dict[str, Any]) -> set[EventPurpose]:
-        event_type = str(event_data.get("eventType") or "").upper()
+        raw_event_type = str(event_data.get("eventType") or "").strip()
+        event_type = raw_event_type.lower().replace("_", "")
         if not event_type:
             return set()
 
-        if event_type == "ENTITY_CREATED":
+        if event_type == "entitycreated":
             return {EventPurpose.CLASSIFY, EventPurpose.TAG_SYNC}
 
         change_desc = event_data.get("changeDescription") or {}
-        has_tag = cls._has_tag_change(change_desc)
-        has_column_struct = cls._has_column_structural_change(change_desc)
-        has_classify_input = cls._has_classification_input_change(change_desc)
+        inc_change_desc = event_data.get("incrementalChangeDescription") or {}
+
+        has_tag = cls._has_tag_change(change_desc) or cls._has_tag_change(inc_change_desc)
+        has_column_struct = cls._has_column_structural_change(change_desc) or cls._has_column_structural_change(inc_change_desc)
+        has_classify_input = cls._has_classification_input_change(change_desc) or cls._has_classification_input_change(inc_change_desc)
 
         purposes: set[EventPurpose] = set()
 

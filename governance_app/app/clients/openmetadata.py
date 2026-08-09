@@ -19,7 +19,8 @@ class OpenMetadataClient:
     def __init__(self, *, base_url: str, token: str | None, timeout: float = 15.0) -> None:
         headers = {"Accept": "application/json", "Content-Type": "application/json"}
         if token:
-            headers["Authorization"] = f"Bearer {token}"
+            raw_token = token.get_secret_value() if hasattr(token, "get_secret_value") else str(token)
+            headers["Authorization"] = f"Bearer {raw_token}"
         self.client = httpx.Client(
             base_url=base_url.rstrip("/"),
             headers=headers,
@@ -160,7 +161,7 @@ class OpenMetadataClient:
         table = self.get_entity(
             entity_type="table",
             fqn=table_fqn,
-            fields="columns",
+            fields="tags,columns",
         )
 
         for column in table.get("columns", []) or []:
@@ -333,12 +334,15 @@ class OpenMetadataClient:
         entity_tags: list[str],
         field_tags: dict[str, list[str]],
     ) -> None:
-        observed_entity = {
-            item.get("tagFQN")
-            for item in observed.get("entity", {}).get("tags", [])
-            if item.get("tagFQN") and item.get("state", "Confirmed") == "Confirmed"
-        }
-        missing_entity = sorted(set(entity_tags) - observed_entity)
+        obs_entity_tags = set(observed.get("entity_tags") or [])
+        if not obs_entity_tags and isinstance(observed.get("entity"), dict):
+            obs_entity_tags = {
+                item.get("tagFQN")
+                for item in observed.get("entity", {}).get("tags", [])
+                if isinstance(item, dict) and item.get("tagFQN")
+            }
+
+        missing_entity = sorted(set(entity_tags) - obs_entity_tags)
         if missing_entity:
             raise ExternalSystemError(
                 f"OpenMetadata read-back missing confirmed entity tags: {missing_entity}",
@@ -346,19 +350,25 @@ class OpenMetadataClient:
                 retryable=True,
             )
 
-        columns = observed.get("columns", {})
+        obs_field_tags = observed.get("field_tags", {})
+        obs_columns = observed.get("columns", {})
+
         for field_path, expected in field_tags.items():
             column_name = (
                 field_path.split(".", 1)[1]
                 if field_path.startswith("columns.")
                 else field_path
             )
-            observed_tags = {
-                item.get("tagFQN")
-                for item in columns.get(column_name, {}).get("tags", [])
-                if item.get("tagFQN") and item.get("state", "Confirmed") == "Confirmed"
-            }
-            missing = sorted(set(expected) - observed_tags)
+            found = set(
+                obs_field_tags.get(field_path)
+                or obs_field_tags.get(column_name)
+                or [
+                    item.get("tagFQN")
+                    for item in obs_columns.get(column_name, {}).get("tags", [])
+                    if isinstance(item, dict) and item.get("tagFQN")
+                ]
+            )
+            missing = sorted(set(expected) - found)
             if missing:
                 raise ExternalSystemError(
                     f"OpenMetadata read-back missing confirmed tags on {column_name}: {missing}",
@@ -373,8 +383,7 @@ class OpenMetadataClient:
             if not isinstance(item, dict):
                 continue
             tag_fqn = str(item.get("tagFQN") or "").strip()
-            state = str(item.get("state") or "Confirmed")
-            if tag_fqn and state.lower() == "confirmed":
+            if tag_fqn:
                 confirmed.add(tag_fqn)
         return sorted(confirmed)
 
@@ -515,7 +524,7 @@ class OpenMetadataClient:
 
             self._request(
                 "PATCH",
-                f"/v1/tables/name/{quote(table_fqn, safe='')}",
+                f"/v1/tables/{table_id}",
                 json=patch,
                 headers={
                     "Content-Type":

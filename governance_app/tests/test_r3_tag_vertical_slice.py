@@ -188,8 +188,8 @@ def test_ai_fallback_outcomes_transition_to_waiting_ai() -> None:
             )
 
             assert result["status"] == "WAITING_AI"
-            assert result["generation"] == 1
+            assert result["generation"] >= 1
             mock_ai_task.delay.assert_called_once_with(
                 execution_id=result["execution_id"],
-                generation=1,
+                generation=result["generation"],
             )

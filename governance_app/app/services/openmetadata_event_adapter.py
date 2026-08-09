@@ -1,11 +1,10 @@
 """Adapter for raw OpenMetadata ChangeEvent webhooks using EventInbox and EventPurposeRouter.
 
-Per R3 target flow:
-- Webhook is a trigger, NOT business truth.
-- Persists to event_inbox for idempotency & audit.
-- Evaluates EventPurposeRouter -> {CLASSIFY}, {TAG_SYNC}, both, or none.
-- Dispatches Celery tasks accordingly.
-- Tag-only changes route strictly to {TAG_SYNC} (prevents loops!).
+Per R3 target flow & transaction fence:
+- TX1: Persist event_inbox record -> session.commit()
+- Celery Task Publication (outside TX1, after commit)
+- TX2: Record dispatched tasks & update status -> session.commit()
+- Partial / Broker Failure Recovery: Duplicate deliveries check undispatched purposes and publish missing tasks.
 """
 from __future__ import annotations
 
@@ -63,6 +62,9 @@ class OpenMetadataEventAdapterService:
         purposes = EventPurposeRouter.route(event_data)
         purpose_strings = sorted(p.value for p in purposes)
 
+        # ---------------------------------------------------------------------
+        # TX1: Persist event_inbox record to DB and COMMIT before Celery publish
+        # ---------------------------------------------------------------------
         inbox_record, is_duplicate = self.inbox.record_event(
             event_id=event_id,
             event_type=event_type,
@@ -73,8 +75,14 @@ class OpenMetadataEventAdapterService:
             correlation_id=correlation_id,
         )
 
-        if is_duplicate:
-            logger.info("Duplicate event %s skipped", event_id)
+        # Commit TX1 so that independent sessions / background tasks can see inbox_record immediately
+        self.session.commit()
+
+        dispatched_purposes = set(inbox_record.dispatched_purposes or [])
+        already_fully_dispatched = is_duplicate and set(purpose_strings).issubset(dispatched_purposes)
+
+        if already_fully_dispatched:
+            logger.info("Duplicate event %s already fully dispatched", event_id)
             self.audit.record(
                 actor_id="system:openmetadata-webhook",
                 actor_name="OpenMetadata Webhook Adapter",
@@ -84,12 +92,16 @@ class OpenMetadataEventAdapterService:
                 correlation_id=correlation_id,
                 details={"event_id": event_id, "status": "duplicate"},
             )
+            self.session.commit()
             return {"status": "duplicate", "event_id": event_id}
 
+        # ---------------------------------------------------------------------
+        # Publish Celery tasks ONLY after TX1 has been committed
+        # ---------------------------------------------------------------------
         dispatched_tasks: list[str] = []
+        newly_dispatched_purposes: list[str] = []
 
-        if EventPurpose.CLASSIFY in purposes:
-            # Dispatch classification task
+        if EventPurpose.CLASSIFY in purposes and EventPurpose.CLASSIFY.value not in dispatched_purposes:
             try:
                 task_res = classify_entity.delay(
                     event_id=event_id,
@@ -98,21 +110,20 @@ class OpenMetadataEventAdapterService:
                     correlation_id=correlation_id,
                 )
                 dispatched_tasks.append(str(task_res.id))
+                newly_dispatched_purposes.append(EventPurpose.CLASSIFY.value)
+                self.audit.record(
+                    actor_id="system:openmetadata-webhook",
+                    actor_name="OpenMetadata Webhook Adapter",
+                    action="ASSET_CLASSIFICATION_DISPATCHED",
+                    object_type=entity_type,
+                    object_id=entity_fqn,
+                    correlation_id=correlation_id,
+                    details={"event_id": event_id, "purposes": purpose_strings, "task_id": str(task_res.id)},
+                )
             except Exception as exc:
                 logger.warning("Could not dispatch classify_entity task: %s", exc)
 
-            self.audit.record(
-                actor_id="system:openmetadata-webhook",
-                actor_name="OpenMetadata Webhook Adapter",
-                action="ASSET_CLASSIFICATION_DISPATCHED",
-                object_type=entity_type,
-                object_id=entity_fqn,
-                correlation_id=correlation_id,
-                details={"event_id": event_id, "purposes": purpose_strings},
-            )
-
-        if EventPurpose.TAG_SYNC in purposes:
-            # Dispatch tag sync task (ranger.tag-sync queue, concurrency 1)
+        if EventPurpose.TAG_SYNC in purposes and EventPurpose.TAG_SYNC.value not in dispatched_purposes:
             try:
                 task_res = sync_tags_to_ranger.delay(
                     entity_type=entity_type,
@@ -120,20 +131,31 @@ class OpenMetadataEventAdapterService:
                     correlation_id=correlation_id,
                 )
                 dispatched_tasks.append(str(task_res.id))
+                newly_dispatched_purposes.append(EventPurpose.TAG_SYNC.value)
+                self.audit.record(
+                    actor_id="system:openmetadata-webhook",
+                    actor_name="OpenMetadata Webhook Adapter",
+                    action="RANGER_TAG_SYNC_DISPATCHED",
+                    object_type=entity_type,
+                    object_id=entity_fqn,
+                    correlation_id=correlation_id,
+                    details={"event_id": event_id, "purposes": purpose_strings, "task_id": str(task_res.id)},
+                )
             except Exception as exc:
                 logger.warning("Could not dispatch sync_tags_to_ranger task: %s", exc)
 
-            self.audit.record(
-                actor_id="system:openmetadata-webhook",
-                actor_name="OpenMetadata Webhook Adapter",
-                action="RANGER_TAG_SYNC_DISPATCHED",
-                object_type=entity_type,
-                object_id=entity_fqn,
-                correlation_id=correlation_id,
-                details={"event_id": event_id, "purposes": purpose_strings},
-            )
+        # ---------------------------------------------------------------------
+        # TX2: Record successful dispatch state in DB and COMMIT
+        # ---------------------------------------------------------------------
+        for purpose, task_id in zip(newly_dispatched_purposes, dispatched_tasks):
+            self.inbox.record_purpose_dispatched(inbox_record.id, purpose, task_id)
 
-        self.inbox.mark_processed(inbox_record.id)
+        # Mark processed if all required purposes were dispatched (or no work required)
+        updated_dispatched = set(inbox_record.dispatched_purposes or [])
+        if set(purpose_strings).issubset(updated_dispatched) or not purpose_strings:
+            self.inbox.mark_processed(inbox_record.id)
+
+        self.session.commit()
 
         return {
             "status": "accepted",

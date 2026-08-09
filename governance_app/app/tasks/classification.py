@@ -61,12 +61,11 @@ def classify_entity(
         exec_repo = ClassificationExecutionRepository(session)
         audit_repo = AuditRepository(session)
 
-        # Create EVALUATING execution record
-        execution = exec_repo.create(
+        # Create EVALUATING execution record with next generation N+1 (supersedes older unfinished runs)
+        execution = exec_repo.create_next_generation(
             event_id=event_id,
             entity_type=entity_type,
             entity_fqn=entity_fqn,
-            generation=1,
             status="EVALUATING",
             correlation_id=correlation_id,
         )

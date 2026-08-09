@@ -33,7 +33,6 @@ class EventInboxRepository:
         """Record incoming webhook event.
 
         Returns (event_inbox_record, is_duplicate).
-        If event_id already exists, returns existing record and True.
         """
         existing = self.get_by_event_id(event_id)
         if existing is not None:
@@ -46,6 +45,8 @@ class EventInboxRepository:
             entity_fqn=entity_fqn,
             payload=payload,
             purposes=purposes,
+            dispatched_purposes=[],
+            dispatched_tasks={},
             status="RECEIVED",
             correlation_id=correlation_id,
         )
@@ -59,6 +60,27 @@ class EventInboxRepository:
             if existing is not None:
                 return existing, True
             raise
+
+    def record_purpose_dispatched(self, record_id: Any, purpose: str, task_id: str) -> EventInbox | None:
+        record = self.session.get(EventInbox, record_id)
+        if record:
+            current_purposes = list(record.dispatched_purposes or [])
+            if purpose not in current_purposes:
+                current_purposes.append(purpose)
+                record.dispatched_purposes = current_purposes
+
+            current_tasks = dict(record.dispatched_tasks or {})
+            current_tasks[purpose] = task_id
+            record.dispatched_tasks = current_tasks
+
+            # Check if all required purposes have been dispatched
+            required = set(record.purposes or [])
+            dispatched = set(current_purposes)
+            if required.issubset(dispatched):
+                record.status = "DISPATCHED"
+
+            self.session.flush()
+        return record
 
     def mark_processed(self, record_id: Any) -> None:
         record = self.session.get(EventInbox, record_id)

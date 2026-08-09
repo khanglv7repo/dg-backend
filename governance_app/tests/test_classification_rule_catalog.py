@@ -37,17 +37,16 @@ def payload(document=DOCUMENT) -> bytes:
 def test_import_json_creates_and_activates_rule_set(
     session,
 ) -> None:
-    with session.begin():
-        record, created, activated = (
-            ClassificationRuleCatalogService(
-                session
-            ).import_json(
-                payload(),
-                filename="rules.json",
-                actor_id="admin",
-                actor_name="Admin",
-            )
+    record, created, activated = (
+        ClassificationRuleCatalogService(
+            session
+        ).import_json(
+            payload(),
+            filename="rules.json",
+            actor_id="admin",
+            actor_name="Admin",
         )
+    )
 
     assert created is True
     assert activated is True
@@ -69,23 +68,21 @@ def test_reimport_same_json_is_idempotent(
         session
     )
 
-    with session.begin():
-        first, _, _ = service.import_json(
+    first, _, _ = service.import_json(
+        payload(),
+        filename="rules.json",
+        actor_id="admin",
+        actor_name="Admin",
+    )
+
+    second, created, activated = (
+        service.import_json(
             payload(),
             filename="rules.json",
             actor_id="admin",
             actor_name="Admin",
         )
-
-    with session.begin():
-        second, created, activated = (
-            service.import_json(
-                payload(),
-                filename="rules.json",
-                actor_id="admin",
-                actor_name="Admin",
-            )
-        )
+    )
 
     assert created is False
     assert activated is False
@@ -99,13 +96,12 @@ def test_new_import_becomes_only_active_version(
         session
     )
 
-    with session.begin():
-        first, _, _ = service.import_json(
-            payload(),
-            filename="rules-v1.json",
-            actor_id="admin",
-            actor_name="Admin",
-        )
+    first, _, _ = service.import_json(
+        payload(),
+        filename="rules-v1.json",
+        actor_id="admin",
+        actor_name="Admin",
+    )
 
     second_document = {
         **DOCUMENT,
@@ -122,19 +118,20 @@ def test_new_import_becomes_only_active_version(
         ],
     }
 
-    with session.begin():
-        second, _, activated = (
-            service.import_json(
-                payload(second_document),
-                filename="rules-v2.json",
-                actor_id="admin",
-                actor_name="Admin",
-            )
+    second, _, activated = (
+        service.import_json(
+            payload(second_document),
+            filename="rules-v2.json",
+            actor_id="admin",
+            actor_name="Admin",
         )
+    )
 
     assert activated is True
     assert second.status == "ACTIVE"
-    assert first.status == "INACTIVE"
+
+    refreshed_first = service.version_repo.get_by_checksum("default", first.checksum)
+    assert refreshed_first.status == "INACTIVE"
     assert service.get_active().id == second.id
 
 
@@ -185,7 +182,7 @@ def test_active_engine_requires_uploaded_rules(
 ) -> None:
     with pytest.raises(
         ConfigurationError,
-        match="no active classification rule set",
+        match="no active classification rule version",
     ):
         ClassificationRuleCatalogService(
             session

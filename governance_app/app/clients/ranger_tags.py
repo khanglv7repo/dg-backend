@@ -217,6 +217,80 @@ class RangerTagStoreClient:
             },
         )
 
+    def read_actual_state(self, entity_fqn: str) -> set[tuple[str, str]]:
+        """Production read-back method: reads actual (field_path, tag_type) mappings for entity_fqn."""
+        if self.dry_run:
+            return set()
+
+        resources = {
+            int(item["id"]): item
+            for item in self.list_resources()
+            if item.get("id") is not None
+            and self._is_managed_entity_resource(item, entity_fqn)
+        }
+        if not resources:
+            return set()
+
+        tags = {
+            int(item["id"]): item
+            for item in self.list_tags()
+            if item.get("id") is not None
+        }
+
+        actual: set[tuple[str, str]] = set()
+        for mapping in self.list_tag_resource_maps():
+            resource_id = mapping.get("resourceId")
+            tag_id = mapping.get("tagId")
+            if resource_id is None or tag_id is None:
+                continue
+
+            resource = resources.get(int(resource_id))
+            tag = tags.get(int(tag_id))
+            if resource is None or tag is None:
+                continue
+
+            info = resource.get("additionalInfo") or {}
+            field_path = info.get("fieldPath")
+            if not field_path:
+                elements = resource.get("resourceElements") or {}
+                cols = (elements.get("column") or {}).get("values") or []
+                if cols and cols != ["*"]:
+                    field_path = f"columns.{cols[0]}"
+                else:
+                    field_path = "$entity"
+
+            tag_type = str(tag.get("type") or "")
+            if tag_type:
+                actual.add((field_path, tag_type))
+
+        return actual
+
+    def compare_state(
+        self,
+        desired: set[tuple[str, str]],
+        actual: set[tuple[str, str]],
+    ) -> bool:
+        """Pure production semantic comparison between desired and actual state."""
+        return desired == actual
+
+    def verify_convergence(
+        self,
+        *,
+        entity_fqn: str,
+        entity_tags: list[str],
+        field_tags: dict[str, list[str]],
+    ) -> bool:
+        """Production read-back verification method."""
+        if self.dry_run:
+            return True
+
+        desired = self._expected_assignments(
+            entity_tags=entity_tags,
+            field_tags=field_tags,
+        )
+        actual = self.read_actual_state(entity_fqn)
+        return self.compare_state(desired, actual)
+
     def reconcile_assignments(
         self,
         *,
@@ -319,10 +393,16 @@ class RangerTagStoreClient:
             if resource is None or tag is None:
                 continue
 
-            field_path = str(
-                (resource.get("additionalInfo") or {}).get("fieldPath")
-                or "$entity"
-            )
+            info = resource.get("additionalInfo") or {}
+            field_path = info.get("fieldPath")
+            if not field_path:
+                elements = resource.get("resourceElements") or {}
+                cols = (elements.get("column") or {}).get("values") or []
+                if cols and cols != ["*"]:
+                    field_path = f"columns.{cols[0]}"
+                else:
+                    field_path = "$entity"
+
             tag_type = str(tag.get("type") or "")
             if not tag_type or (field_path, tag_type) in expected:
                 continue
@@ -331,7 +411,7 @@ class RangerTagStoreClient:
             if mapping_id is None:
                 continue
 
-            self._request("DELETE", f"/tagresourcemap/{mapping_id}")
+            self._request("DELETE", f"/tagresourcemaps/{mapping_id}", allow_404=True)
             removed.append(
                 {
                     "field_path": field_path,
@@ -421,10 +501,15 @@ class RangerTagStoreClient:
     @staticmethod
     def _is_managed_entity_resource(resource: dict, entity_fqn: str) -> bool:
         info = resource.get("additionalInfo") or {}
-        return (
-            str(info.get("managedBy") or "") == "dg-backend"
-            and str(info.get("openmetadataFqn") or "") == entity_fqn
-        )
+        if str(info.get("managedBy") or "") == "dg-backend" and str(info.get("openmetadataFqn") or "") == entity_fqn:
+            return True
+
+        elements = resource.get("resourceElements") or {}
+        table_vals = (elements.get("table") or {}).get("values") or []
+        schema_vals = (elements.get("schema") or {}).get("values") or []
+        database_vals = (elements.get("database") or {}).get("values") or []
+
+        return entity_fqn in table_vals or entity_fqn in schema_vals or entity_fqn in database_vals
 
     @staticmethod
     def _normalized_resource_elements(value: Any) -> dict[str, tuple[str, ...]]:

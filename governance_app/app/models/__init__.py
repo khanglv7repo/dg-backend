@@ -6,6 +6,7 @@ from app.models.audit import (
 from app.models.classification import ClassificationRun
 from app.models.classification_execution import ClassificationExecution
 from app.models.classification_rule_set import ClassificationRuleSet
+from app.models.classification_rule_version import ClassificationRuleVersion
 from app.models.event_inbox import EventInbox
 from app.models.job import GovernanceJob
 from app.models.policy import GovernancePolicy
@@ -18,6 +19,7 @@ __all__ = [
     "ClassificationExecution",
     "ClassificationRun",
     "ClassificationRuleSet",
+    "ClassificationRuleVersion",
     "EventInbox",
     "GovernanceJob",
     "GovernancePolicy",

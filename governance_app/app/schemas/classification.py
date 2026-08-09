@@ -7,8 +7,10 @@ from pydantic import BaseModel, Field
 
 class MatchOutcome(StrEnum):
     EXACT = "EXACT"
+    MATCH = "MATCH"
     AMBIGUOUS = "AMBIGUOUS"
     NO_MATCH = "NO_MATCH"
+    CONFLICT = "CONFLICT"
 
 
 class TagSuggestion(BaseModel):

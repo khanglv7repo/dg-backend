@@ -1,7 +1,8 @@
 """Celery task for OpenMetadata -> Ranger tag synchronization (R3 TAG Vertical Slice).
 
 Runs on dedicated `ranger.tag-sync` queue (concurrency = 1).
-Re-reads latest authoritative OpenMetadata Confirmed tag state and reconciles Ranger Tag Store.
+Re-reads latest authoritative OpenMetadata Confirmed tag state, reconciles Ranger Tag Store,
+and verifies read-back convergence before marking status SYNCHRONIZED.
 """
 from __future__ import annotations
 
@@ -14,6 +15,7 @@ from app.celery_app import app
 from app.clients.openmetadata import OpenMetadataClient
 from app.clients.ranger_tags import RangerTagStoreClient
 from app.core.config import get_settings
+from app.core.errors import ExternalSystemError
 from app.db.session import SessionLocal
 from app.repositories.audit import AuditRepository
 from app.repositories.tag_sync_state import TagSyncStateRepository
@@ -92,7 +94,21 @@ def sync_tags_to_ranger(
                 field_tags=field_tags,
             )
 
-            # 3. Update TagSyncState in DB
+            # 3. Production read-back verification
+            converged = tag_store.verify_convergence(
+                entity_fqn=entity_fqn,
+                entity_tags=entity_tags,
+                field_tags=field_tags,
+            )
+
+            if not converged:
+                raise ExternalSystemError(
+                    f"Ranger tag store failed read-back convergence verification for {entity_fqn}",
+                    system="ranger-tag-store",
+                    retryable=True,
+                )
+
+            # 4. Update TagSyncState in DB ONLY upon verified convergence
             sync_repo.record_sync(
                 entity_type=entity_type,
                 entity_fqn=entity_fqn,
@@ -113,6 +129,7 @@ def sync_tags_to_ranger(
                     "field_tags": field_tags,
                     "checksum": checksum,
                     "result": result,
+                    "converged": True,
                 },
             )
             session.commit()

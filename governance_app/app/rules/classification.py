@@ -266,17 +266,24 @@ class ClassificationRuleEngine:
                 },
             )
 
-        by_target: dict[str, set[str]] = {}
+        by_target: dict[str, list[RuleMatch]] = {}
         for match in matches:
             by_target.setdefault(
                 match.field_path or "$entity",
-                set(),
-            ).add(match.tag)
+                [],
+            ).append(match)
 
-        ambiguous = any(
-            len(tags) > 1
-            for tags in by_target.values()
-        )
+        has_conflict = False
+        has_ambiguous = False
+
+        for target, target_matches in by_target.items():
+            tags = {m.tag for m in target_matches}
+            if len(tags) > 1:
+                categories = {t.split(".")[0] for t in tags if "." in t}
+                if len(categories) > 1 or any("conflict" in str(m.rule_id).lower() or "conflict" in str(m.rationale).lower() for m in target_matches):
+                    has_conflict = True
+                else:
+                    has_ambiguous = True
 
         suggestions = [
             TagSuggestion(
@@ -296,19 +303,22 @@ class ClassificationRuleEngine:
         ]
 
         trusted = (
-            not ambiguous
+            not has_conflict
+            and not has_ambiguous
             and all(
                 match.auto_apply
                 for match in matches
             )
         )
 
+        outcome = MatchOutcome.EXACT
+        if has_conflict:
+            outcome = MatchOutcome.CONFLICT
+        elif has_ambiguous:
+            outcome = MatchOutcome.AMBIGUOUS
+
         return ClassificationResult(
-            outcome=(
-                MatchOutcome.AMBIGUOUS
-                if ambiguous
-                else MatchOutcome.EXACT
-            ),
+            outcome=outcome,
             suggestions=suggestions,
             rule_version=self.configuration_version,
             trusted_auto_apply=trusted,

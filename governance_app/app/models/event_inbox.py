@@ -27,6 +27,8 @@ class EventInbox(Base):
     entity_fqn: Mapped[str] = mapped_column(String(1024), nullable=False)
     payload: Mapped[dict] = mapped_column(JSON_TYPE, nullable=False, default=dict)
     purposes: Mapped[list] = mapped_column(JSON_TYPE, nullable=False, default=list)
+    dispatched_purposes: Mapped[list] = mapped_column(JSON_TYPE, nullable=False, default=list)
+    dispatched_tasks: Mapped[dict] = mapped_column(JSON_TYPE, nullable=False, default=dict)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="RECEIVED")
     correlation_id: Mapped[str | None] = mapped_column(String(128))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)

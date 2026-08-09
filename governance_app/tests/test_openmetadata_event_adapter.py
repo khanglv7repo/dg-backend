@@ -45,14 +45,13 @@ def test_tag_change_enqueues_tag_sync_without_reclassification(session) -> None:
 
     with patch("app.services.openmetadata_event_adapter.sync_tags_to_ranger") as mock_tag_sync, \
          patch("app.services.openmetadata_event_adapter.classify_entity") as mock_classify:
-        
+
         mock_tag_sync.delay.return_value.id = "task-tag-sync-1"
 
-        with session.begin():
-            res = OpenMetadataEventAdapterService(
-                session,
-                _settings(),
-            ).process_change_event(event)
+        res = OpenMetadataEventAdapterService(
+            session,
+            _settings(),
+        ).process_change_event(event)
 
         assert res["status"] == "accepted"
         assert res["purposes"] == [EventPurpose.TAG_SYNC.value]
@@ -90,11 +89,10 @@ def test_non_tag_metadata_update_still_enqueues_classification(session) -> None:
     with patch("app.services.openmetadata_event_adapter.classify_entity") as mock_classify:
         mock_classify.delay.return_value.id = "task-classify-1"
 
-        with session.begin():
-            res = OpenMetadataEventAdapterService(
-                session,
-                _settings(),
-            ).process_change_event(event)
+        res = OpenMetadataEventAdapterService(
+            session,
+            _settings(),
+        ).process_change_event(event)
 
         assert res["status"] == "accepted"
         assert EventPurpose.CLASSIFY.value in res["purposes"]
