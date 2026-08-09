@@ -104,9 +104,14 @@ def activate(session, client: RangerClient, *, key: str, policy: dict):
             actor_name="Admin",
         )
     with session.begin():
-        service.activate_version(
+        target = service.read_activation_target(
             policy_key=key,
             version=version.version,
+        )
+    validation = service.validate_activation_subjects(target)
+    with session.begin():
+        service.activate_version(
+            validation=validation,
             actor_id="admin",
             actor_name="Admin",
         )
@@ -227,9 +232,14 @@ def test_stale_v1_target_after_v2_activation_has_zero_ranger_mutation(session) -
                 actor_name="Admin",
             )
         with session.begin():
-            service.activate_version(
+            target = service.read_activation_target(
                 policy_key=v1.policy_key,
                 version=v2.version,
+            )
+        validation = service.validate_activation_subjects(target)
+        with session.begin():
+            service.activate_version(
+                validation=validation,
                 actor_id="admin",
                 actor_name="Admin",
             )
@@ -273,9 +283,14 @@ def test_rollback_reactivates_immutable_version_and_reuses_normal_reconciliation
                 actor_name="Admin",
             )
         with session.begin():
-            service.activate_version(
+            target = service.read_activation_target(
                 policy_key=v1.policy_key,
                 version=v2.version,
+            )
+        validation = service.validate_activation_subjects(target)
+        with session.begin():
+            service.activate_version(
+                validation=validation,
                 actor_id="admin",
                 actor_name="Admin",
             )
@@ -284,11 +299,18 @@ def test_rollback_reactivates_immutable_version_and_reuses_normal_reconciliation
         assert second["status"] == "SYNCHRONIZED"
 
         with session.begin():
+            rollback_target = service.read_rollback_target(
+                policy_key=v1.policy_key,
+                target_version=1,
+            )
+        rollback_validation = service.validate_activation_subjects(rollback_target)
+        with session.begin():
             rolled_back, changed = service.rollback(
                 policy_key=v1.policy_key,
                 target_version=1,
                 actor_id="admin",
                 actor_name="Admin",
+                validation=rollback_validation,
             )
         assert changed is True
         assert rolled_back.id == v1.id

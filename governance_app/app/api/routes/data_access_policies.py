@@ -147,15 +147,24 @@ def activate_policy_version(
     _require_admin(actor)
     ranger = build_resource_ranger_client(settings)
     try:
-        # TX1: subject reads + ACTIVE transition + desired projection state.
+        with db.begin():
+            target = DataAccessPolicyService(db, settings).read_activation_target(
+                policy_key=policy_key,
+                version=version,
+            )
+        validation = DataAccessPolicyService(
+            db,
+            settings,
+            ranger_client=ranger,
+        ).validate_activation_subjects(target)
+
+        # TX2: ACTIVE transition + desired projection state only.
         with db.begin():
             selected, _changed = DataAccessPolicyService(
                 db,
                 settings,
-                ranger_client=ranger,
             ).activate_version(
-                policy_key=policy_key,
-                version=version,
+                validation=validation,
                 actor_id=actor.subject,
                 actor_name=actor.display_name,
             )
@@ -186,15 +195,26 @@ def rollback_policy(
     ranger = build_resource_ranger_client(settings)
     try:
         with db.begin():
+            target = DataAccessPolicyService(db, settings).read_rollback_target(
+                policy_key=policy_key,
+                target_version=request.target_version,
+            )
+        validation = DataAccessPolicyService(
+            db,
+            settings,
+            ranger_client=ranger,
+        ).validate_activation_subjects(target)
+
+        with db.begin():
             selected, _changed = DataAccessPolicyService(
                 db,
                 settings,
-                ranger_client=ranger,
             ).rollback(
                 policy_key=policy_key,
                 target_version=request.target_version,
                 actor_id=actor.subject,
                 actor_name=actor.display_name,
+                validation=validation,
             )
         version_id = str(selected.id)
         response_version = PolicyVersionResponse.model_validate(selected)

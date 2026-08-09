@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import create_autospec, patch
 
 from sqlalchemy.orm import sessionmaker
 
 from app.clients.ranger import RangerClient
+from app.celery_app import app as celery_app
 from app.core.config import Settings
 from app.services.data_access_policy import DataAccessPolicyService
 from app.tasks import policy_sync as policy_task
@@ -18,6 +20,20 @@ def policy(select_only: bool = False) -> dict:
         "masks": {},
         "row_filter": None,
     }
+
+
+def test_policy_task_routes_to_consumed_default_queue() -> None:
+    route = celery_app.conf.task_routes[
+        "app.tasks.policy_sync.sync_policy_to_ranger"
+    ]
+    queue = route["queue"]
+    makefile = Path("Makefile").read_text()
+
+    assert queue == "default"
+    assert queue in celery_app.conf.task_queues
+    assert "celery -A app.celery_app worker -Q default" in makefile
+    assert "celery -A app.celery_app worker -Q ranger.tag-sync -c 1" in makefile
+    assert "ranger.policy-sync" not in makefile
 
 
 def test_celery_production_task_rechecks_active_and_fences_stale_v1(session) -> None:
@@ -48,16 +64,26 @@ def test_celery_production_task_rechecks_active_and_fences_stale_v1(session) -> 
             actor_name="Admin",
         )
     with session.begin():
-        service.activate_version(
+        target = service.read_activation_target(
             policy_key="task-fence",
             version=v1.version,
+        )
+    validation = service.validate_activation_subjects(target)
+    with session.begin():
+        service.activate_version(
+            validation=validation,
             actor_id="admin",
             actor_name="Admin",
         )
     with session.begin():
-        service.activate_version(
+        target = service.read_activation_target(
             policy_key="task-fence",
             version=v2.version,
+        )
+    validation = service.validate_activation_subjects(target)
+    with session.begin():
+        service.activate_version(
+            validation=validation,
             actor_id="admin",
             actor_name="Admin",
         )

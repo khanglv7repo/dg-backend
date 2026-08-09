@@ -206,7 +206,7 @@ class PreviewPolicyRequest(BaseModel):
 
 
 class RollbackPolicyRequest(BaseModel):
-    target_version: int | None = Field(default=None, ge=1)
+    target_version: int = Field(ge=1)
 
 
 class PolicyVersionResponse(ORMModel):

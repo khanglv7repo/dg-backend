@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
+from uuid import UUID
 
 from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy.orm import Session
@@ -18,6 +20,23 @@ from app.schemas.data_access_policy import (
     normalize_policy_key,
 )
 from app.services.policy_compiler import PolicyCompiler
+
+
+@dataclass(frozen=True)
+class PolicyActivationTarget:
+    policy_key: str
+    version: int
+    policy_version_id: UUID
+    checksum: str
+    logical_policy: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class PolicySubjectValidation:
+    policy_key: str
+    version: int
+    policy_version_id: UUID
+    checksum: str
 
 
 class DataAccessPolicyService:
@@ -153,8 +172,7 @@ class DataAccessPolicyService:
     def activate_version(
         self,
         *,
-        policy_key: str,
-        version: int,
+        validation: PolicySubjectValidation,
         actor_id: str,
         actor_name: str,
         correlation_id: str | None = None,
@@ -162,13 +180,16 @@ class DataAccessPolicyService:
     ):
         """Persist approved desired authority; never mutates Ranger here."""
 
-        key = self._policy_key(policy_key)
-        selected = self.repository.get_version(key, version)
+        key = self._policy_key(validation.policy_key)
+        selected = self.repository.get_version(key, validation.version)
+        if (
+            selected.id != validation.policy_version_id
+            or selected.checksum != validation.checksum
+        ):
+            raise ConflictError(
+                "validated policy activation target no longer matches durable version"
+            )
         parsed = self._logical_policy(selected.logical_policy)
-
-        # Ranger owns users/groups. Validation is read-only and occurs before
-        # any authoritative version transition or Ranger policy mutation.
-        self._validate_subjects(parsed)
 
         compiled = self.compiler.compile(
             policy_key=key,
@@ -199,32 +220,93 @@ class DataAccessPolicyService:
         )
         return selected, changed
 
+    def read_activation_target(
+        self,
+        *,
+        policy_key: str,
+        version: int,
+    ) -> PolicyActivationTarget:
+        key = self._policy_key(policy_key)
+        selected = self.repository.get_version(key, version)
+        return PolicyActivationTarget(
+            policy_key=key,
+            version=selected.version,
+            policy_version_id=selected.id,
+            checksum=selected.checksum,
+            logical_policy=dict(selected.logical_policy),
+        )
+
+    def read_rollback_target(
+        self,
+        *,
+        policy_key: str,
+        target_version: int,
+    ) -> PolicyActivationTarget:
+        key = self._policy_key(policy_key)
+        active = self.repository.get_active(key)
+        if active is None:
+            raise ConflictError(f"policy {key!r} has no ACTIVE version to roll back")
+        target = self.repository.get_version(key, target_version)
+        if target.version > active.version:
+            raise ConflictError(
+                "rollback target must be the current ACTIVE version or an older immutable version"
+            )
+        return PolicyActivationTarget(
+            policy_key=key,
+            version=target.version,
+            policy_version_id=target.id,
+            checksum=target.checksum,
+            logical_policy=dict(target.logical_policy),
+        )
+
+    def validate_activation_subjects(
+        self,
+        target: PolicyActivationTarget,
+    ) -> PolicySubjectValidation:
+        """Validate Ranger USER/GROUP references for an exact immutable version.
+
+        This method performs external read-only Ranger HTTP and no database
+        writes. Callers pass its proof into ``activate_version`` so the write
+        path cannot accidentally skip required subject validation.
+        """
+
+        parsed = self._logical_policy(target.logical_policy)
+        self._validate_subjects(parsed)
+        return PolicySubjectValidation(
+            policy_key=target.policy_key,
+            version=target.version,
+            policy_version_id=target.policy_version_id,
+            checksum=target.checksum,
+        )
+
     def rollback(
         self,
         *,
         policy_key: str,
-        target_version: int | None,
+        target_version: int,
         actor_id: str,
         actor_name: str,
+        validation: PolicySubjectValidation,
         correlation_id: str | None = None,
     ):
         key = self._policy_key(policy_key)
         active = self.repository.get_active(key)
         if active is None:
             raise ConflictError(f"policy {key!r} has no ACTIVE version to roll back")
-        target = (
-            self.repository.get_version(key, target_version)
-            if target_version is not None
-            else self.repository.previous_version(
-                policy_key=key,
-                before_version=active.version,
+        target = self.repository.get_version(key, target_version)
+        if target.version > active.version:
+            raise ConflictError(
+                "rollback target must be the current ACTIVE version or an older immutable version"
             )
-        )
-        if target.id == active.id:
-            raise ConflictError("rollback target is already ACTIVE")
+        if (
+            target.id != validation.policy_version_id
+            or target.checksum != validation.checksum
+        ):
+            raise ConflictError(
+                "validated rollback target no longer matches durable version"
+            )
         return self.activate_version(
-            policy_key=key,
-            version=target.version,
+            validation=validation,
             actor_id=actor_id,
             actor_name=actor_name,
             correlation_id=correlation_id,

@@ -135,18 +135,28 @@ def test_version_increment_immutability_one_active_and_rollback(session) -> None
 
     v1_snapshot = deepcopy(v1.logical_policy)
     with session.begin():
-        service.activate_version(
+        target = service.read_activation_target(
             policy_key=v1.policy_key,
             version=1,
+        )
+    validation = service.validate_activation_subjects(target)
+    with session.begin():
+        service.activate_version(
+            validation=validation,
             actor_id="admin",
             actor_name="Admin",
         )
     assert v1.status == "ACTIVE"
 
     with session.begin():
-        service.activate_version(
+        target = service.read_activation_target(
             policy_key=v2.policy_key,
             version=2,
+        )
+    validation = service.validate_activation_subjects(target)
+    with session.begin():
+        service.activate_version(
+            validation=validation,
             actor_id="admin",
             actor_name="Admin",
         )
@@ -155,11 +165,18 @@ def test_version_increment_immutability_one_active_and_rollback(session) -> None
     assert v1.logical_policy == v1_snapshot
 
     with session.begin():
+        target = service.read_rollback_target(
+            policy_key=v2.policy_key,
+            target_version=1,
+        )
+    validation = service.validate_activation_subjects(target)
+    with session.begin():
         rolled_back, changed = service.rollback(
             policy_key=v2.policy_key,
-            target_version=None,
+            target_version=1,
             actor_id="admin",
             actor_name="Admin",
+            validation=validation,
         )
     assert changed is True
     assert rolled_back.id == v1.id
@@ -185,13 +202,12 @@ def test_missing_user_blocks_activation_before_projection_mutation(session) -> N
         )
 
     with pytest.raises(ValidationError) as excinfo:
-        with session.begin():
-            service.activate_version(
+        service.validate_activation_subjects(
+            service.read_activation_target(
                 policy_key="missing-user",
                 version=version.version,
-                actor_id="admin",
-                actor_name="Admin",
             )
+        )
     assert excinfo.value.details["missing_subjects"] == [
         {"type": "USER", "name": "alice"}
     ]
@@ -214,11 +230,10 @@ def test_missing_group_blocks_activation(session) -> None:
         )
 
     with pytest.raises(ValidationError):
-        with session.begin():
-            service.activate_version(
+        service.validate_activation_subjects(
+            service.read_activation_target(
                 policy_key="missing-group",
                 version=version.version,
-                actor_id="admin",
-                actor_name="Admin",
             )
+        )
     assert service.repository.list_projections(version.id) == []
