@@ -1,4 +1,4 @@
-.PHONY: install test api execution-worker migrate lint verify-openapi
+.PHONY: install test api execution-worker migrate lint verify-openapi celery-worker worker-tag-sync celery-beat
 
 install:
 	python -m pip install -e '.[dev,postgres,trino]'
@@ -11,6 +11,15 @@ api:
 
 execution-worker:
 	python -m app.workers.execution_worker
+
+celery-worker:
+	celery -A app.celery_app worker -Q default -c 4 --loglevel=info
+
+worker-tag-sync:
+	celery -A app.celery_app worker -Q ranger.tag-sync -c 1 --loglevel=info
+
+celery-beat:
+	celery -A app.celery_app beat --loglevel=info
 
 migrate:
 	alembic upgrade head
