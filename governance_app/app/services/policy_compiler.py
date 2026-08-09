@@ -133,7 +133,10 @@ class PolicyCompiler:
             policy_key=policy_key,
             name=self._policy_name(policy_key, "access"),
             policy_type=RANGER_POLICY_TYPE_ACCESS,
-            resources=self._table_resources(logical_policy),
+            resources={
+                **self._table_resources(logical_policy),
+                "column": self._resource("*"),
+            },
             description=f"Data-access projection for {policy_key} [ACCESS]",
         )
         if allow_ops:

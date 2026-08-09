@@ -36,6 +36,7 @@ def test_compiler_access_preserves_allow_and_explicit_deny() -> None:
         "catalog": {"values": ["dev"], "isExcludes": False, "isRecursive": False},
         "schema": {"values": ["sales"], "isExcludes": False, "isRecursive": False},
         "table": {"values": ["customer"], "isExcludes": False, "isRecursive": False},
+        "column": {"values": ["*"], "isExcludes": False, "isRecursive": False},
     }
     assert document["policyItems"][0]["accesses"] == [
         {"type": "select", "isAllowed": True}
