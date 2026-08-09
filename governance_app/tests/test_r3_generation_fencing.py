@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 from app.repositories.classification_execution import ClassificationExecutionRepository
+from app.models.classification_execution import ClassificationExecution
+from sqlalchemy.exc import IntegrityError
 
 
 def test_production_generation_auto_increment_and_superseding(session) -> None:
@@ -34,3 +36,26 @@ def test_production_generation_auto_increment_and_superseding(session) -> None:
     assert stale_rec.status == "SUPERSEDED"
     assert repo.is_current_generation(exec1.id, exec1.generation) is False, "Stale generation MUST NOT be current generation!"
     assert repo.is_current_generation(exec2.id, exec2.generation) is True
+
+
+def test_generation_unique_constraint_rejects_duplicate_generation(session) -> None:
+    repo = ClassificationExecutionRepository(session)
+    repo.create(
+        event_id="evt-a",
+        entity_type="table",
+        entity_fqn="sales.customers",
+        generation=1,
+    )
+
+    try:
+        repo.create(
+            event_id="evt-b",
+            entity_type="table",
+            entity_fqn="sales.customers",
+            generation=1,
+        )
+        assert False, "Duplicate entity_fqn/generation must violate the DB fence"
+    except IntegrityError:
+        session.rollback()
+
+    assert session.query(ClassificationExecution).count() == 0

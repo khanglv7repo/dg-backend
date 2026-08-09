@@ -6,8 +6,6 @@ and verifies read-back convergence before marking status SYNCHRONIZED.
 """
 from __future__ import annotations
 
-import hashlib
-import json
 import logging
 from typing import Any
 
@@ -15,10 +13,9 @@ from app.celery_app import app
 from app.clients.openmetadata import OpenMetadataClient
 from app.clients.ranger_tags import RangerTagStoreClient
 from app.core.config import get_settings
-from app.core.errors import ExternalSystemError
 from app.db.session import SessionLocal
 from app.repositories.audit import AuditRepository
-from app.repositories.tag_sync_state import TagSyncStateRepository
+from app.services.tag_sync_reconciliation import RangerTagSyncReconciliationService
 
 logger = logging.getLogger(__name__)
 
@@ -63,59 +60,14 @@ def sync_tags_to_ranger(
     )
 
     with SessionLocal() as session:
-        sync_repo = TagSyncStateRepository(session)
         audit_repo = AuditRepository(session)
 
         try:
-            # 1. Re-read latest authoritative OpenMetadata Confirmed tag snapshot (Latest-state rule)
-            snapshot = om_client.get_confirmed_tag_snapshot(
-                entity_type=entity_type,
-                entity_fqn=entity_fqn,
-            )
-
-            entity_tags = snapshot["entity_tags"]
-            field_tags = snapshot["field_tags"]
-
-            # Compute checksum of desired state for idempotency check
-            canonical = json.dumps(
-                {
-                    "entity_fqn": entity_fqn,
-                    "entity_tags": sorted(entity_tags),
-                    "field_tags": {k: sorted(v) for k, v in sorted(field_tags.items())},
-                },
-                sort_keys=True,
-            )
-            checksum = hashlib.sha256(canonical.encode()).hexdigest()
-
-            # 2. Reconcile Ranger Tag Store
-            result = tag_store.reconcile_assignments(
-                entity_fqn=entity_fqn,
-                entity_tags=entity_tags,
-                field_tags=field_tags,
-            )
-
-            # 3. Production read-back verification
-            converged = tag_store.verify_convergence(
-                entity_fqn=entity_fqn,
-                entity_tags=entity_tags,
-                field_tags=field_tags,
-            )
-
-            if not converged:
-                raise ExternalSystemError(
-                    f"Ranger tag store failed read-back convergence verification for {entity_fqn}",
-                    system="ranger-tag-store",
-                    retryable=True,
-                )
-
-            # 4. Update TagSyncState in DB ONLY upon verified convergence
-            sync_repo.record_sync(
-                entity_type=entity_type,
-                entity_fqn=entity_fqn,
-                status="SYNCHRONIZED",
-                checksum=checksum,
-                details=result,
-            )
+            result = RangerTagSyncReconciliationService(
+                session,
+                om_client,
+                tag_store,
+            ).synchronize_full_snapshot()
 
             audit_repo.record(
                 actor_id="system:ranger-tag-sync",
@@ -125,11 +77,9 @@ def sync_tags_to_ranger(
                 object_id=entity_fqn,
                 correlation_id=correlation_id,
                 details={
-                    "entity_tags": sorted(entity_tags),
-                    "field_tags": field_tags,
-                    "checksum": checksum,
                     "result": result,
-                    "converged": True,
+                    "trigger_entity_type": entity_type,
+                    "trigger_entity_fqn": entity_fqn,
                 },
             )
             session.commit()
@@ -137,7 +87,6 @@ def sync_tags_to_ranger(
             return {
                 "status": "SYNCHRONIZED",
                 "entity_fqn": entity_fqn,
-                "checksum": checksum,
                 "result": result,
             }
 

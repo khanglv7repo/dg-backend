@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Index, Integer, String, UniqueConstraint
+from sqlalchemy import DateTime, Index, Integer, String, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -16,6 +16,13 @@ class ClassificationRuleVersion(Base):
     __tablename__ = "classification_rule_versions"
     __table_args__ = (
         UniqueConstraint("rule_key", "version", name="uq_classification_rule_version_key_ver"),
+        Index(
+            "uq_classification_rule_versions_one_active",
+            "rule_key",
+            unique=True,
+            postgresql_where=text("status = 'ACTIVE'"),
+            sqlite_where=text("status = 'ACTIVE'"),
+        ),
         Index("ix_classification_rule_versions_key_status", "rule_key", "status"),
     )
 

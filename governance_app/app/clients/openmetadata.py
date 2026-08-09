@@ -161,7 +161,7 @@ class OpenMetadataClient:
         table = self.get_entity(
             entity_type="table",
             fqn=table_fqn,
-            fields="tags,columns",
+            fields=fields,
         )
 
         for column in table.get("columns", []) or []:
@@ -241,6 +241,41 @@ class OpenMetadataClient:
             },
             "all_field_paths": sorted(set(all_field_paths)),
         }
+
+    def list_confirmed_table_tag_snapshots(
+        self,
+        *,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        """Read the latest Confirmed tag state for the current lab table scope.
+
+        The R3 TAG_SYNC worker uses this full snapshot instead of replaying
+        webhook deltas. OpenMetadata is the source of truth; missing ``state`` is
+        accepted as confirmed for deployed OM versions that omit state for
+        confirmed assignments, while explicit Suggested labels are excluded.
+        """
+        response = self._request(
+            "GET",
+            "/v1/tables",
+            params={"limit": limit, "fields": "tags,columns"},
+        )
+        snapshots: list[dict[str, Any]] = []
+        for table in response.get("data", []) or []:
+            if not isinstance(table, dict):
+                continue
+            entity_fqn = str(
+                table.get("fullyQualifiedName") or table.get("name") or ""
+            ).strip()
+            if not entity_fqn:
+                continue
+            snapshots.append(
+                self._confirmed_snapshot_from_entity(
+                    entity_type="table",
+                    entity_fqn=entity_fqn,
+                    entity=table,
+                )
+            )
+        return snapshots
 
     def find_open_tag_suggestion(
         self,
@@ -336,11 +371,9 @@ class OpenMetadataClient:
     ) -> None:
         obs_entity_tags = set(observed.get("entity_tags") or [])
         if not obs_entity_tags and isinstance(observed.get("entity"), dict):
-            obs_entity_tags = {
-                item.get("tagFQN")
-                for item in observed.get("entity", {}).get("tags", [])
-                if isinstance(item, dict) and item.get("tagFQN")
-            }
+            obs_entity_tags = set(
+                self._confirmed_tag_fqns(observed.get("entity", {}).get("tags", []))
+            )
 
         missing_entity = sorted(set(entity_tags) - obs_entity_tags)
         if missing_entity:
@@ -362,11 +395,9 @@ class OpenMetadataClient:
             found = set(
                 obs_field_tags.get(field_path)
                 or obs_field_tags.get(column_name)
-                or [
-                    item.get("tagFQN")
-                    for item in obs_columns.get(column_name, {}).get("tags", [])
-                    if isinstance(item, dict) and item.get("tagFQN")
-                ]
+                or self._confirmed_tag_fqns(
+                    obs_columns.get(column_name, {}).get("tags", [])
+                )
             )
             missing = sorted(set(expected) - found)
             if missing:
@@ -383,9 +414,59 @@ class OpenMetadataClient:
             if not isinstance(item, dict):
                 continue
             tag_fqn = str(item.get("tagFQN") or "").strip()
-            if tag_fqn:
+            state = item.get("state")
+            state_text = str(state).strip().lower() if state is not None else "confirmed"
+            if tag_fqn and state_text == "confirmed":
                 confirmed.add(tag_fqn)
         return sorted(confirmed)
+
+    def _confirmed_snapshot_from_entity(
+        self,
+        *,
+        entity_type: str,
+        entity_fqn: str,
+        entity: dict[str, Any],
+    ) -> dict[str, Any]:
+        entity_tags = self._confirmed_tag_fqns(entity.get("tags", []))
+        field_tags: dict[str, list[str]] = {}
+        all_field_paths: list[str] = []
+
+        for column in entity.get("columns", []) or []:
+            if not isinstance(column, dict):
+                continue
+            column_name = str(column.get("name") or "").strip()
+            if not column_name:
+                continue
+            field_path = f"columns.{column_name}"
+            all_field_paths.append(field_path)
+            confirmed = self._confirmed_tag_fqns(column.get("tags", []))
+            if confirmed:
+                field_tags[field_path] = confirmed
+
+        field_paths: dict[str, list[str]] = {}
+        for field_path, tags in field_tags.items():
+            for tag in tags:
+                field_paths.setdefault(tag, []).append(field_path)
+
+        all_tags = set(entity_tags)
+        for values in field_tags.values():
+            all_tags.update(values)
+
+        return {
+            "entity_type": entity_type,
+            "entity_fqn": entity_fqn,
+            "entity_tags": entity_tags,
+            "field_tags": {
+                key: sorted(set(values))
+                for key, values in sorted(field_tags.items())
+            },
+            "tags": sorted(all_tags),
+            "field_paths": {
+                key: sorted(set(values))
+                for key, values in sorted(field_paths.items())
+            },
+            "all_field_paths": sorted(set(all_field_paths)),
+        }
 
     @staticmethod
     def _suggested_or_confirmed_tag_fqns(labels: Any) -> list[str]:
@@ -524,7 +605,7 @@ class OpenMetadataClient:
 
             self._request(
                 "PATCH",
-                f"/v1/tables/{table_id}",
+                f"/v1/tables/name/{quote(table_fqn, safe='')}",
                 json=patch,
                 headers={
                     "Content-Type":
@@ -535,7 +616,7 @@ class OpenMetadataClient:
         return self.get_column(
             column_fqn=column_fqn,
             entity_type=entity_type,
-            fields="tags",
+            fields="columns",
         )
 
     def _request(self, method: str, path: str, **kwargs) -> dict:

@@ -273,17 +273,12 @@ class ClassificationRuleEngine:
                 [],
             ).append(match)
 
-        has_conflict = False
         has_ambiguous = False
 
         for target, target_matches in by_target.items():
             tags = {m.tag for m in target_matches}
             if len(tags) > 1:
-                categories = {t.split(".")[0] for t in tags if "." in t}
-                if len(categories) > 1 or any("conflict" in str(m.rule_id).lower() or "conflict" in str(m.rationale).lower() for m in target_matches):
-                    has_conflict = True
-                else:
-                    has_ambiguous = True
+                has_ambiguous = True
 
         suggestions = [
             TagSuggestion(
@@ -303,8 +298,7 @@ class ClassificationRuleEngine:
         ]
 
         trusted = (
-            not has_conflict
-            and not has_ambiguous
+            not has_ambiguous
             and all(
                 match.auto_apply
                 for match in matches
@@ -312,9 +306,7 @@ class ClassificationRuleEngine:
         )
 
         outcome = MatchOutcome.EXACT
-        if has_conflict:
-            outcome = MatchOutcome.CONFLICT
-        elif has_ambiguous:
+        if has_ambiguous:
             outcome = MatchOutcome.AMBIGUOUS
 
         return ClassificationResult(

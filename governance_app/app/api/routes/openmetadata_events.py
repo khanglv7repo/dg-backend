@@ -34,9 +34,8 @@ def accept_openmetadata_event(
     auth_secret = x_openmetadata_signature or secret_token
     adapter.verify_webhook_token(auth_secret)
 
-    with db.begin():
-        res = adapter.process_change_event(request.model_dump(mode="json"))
-        tasks = res.get("dispatched_tasks") or []
+    res = adapter.process_change_event(request.model_dump(mode="json"))
+    tasks = res.get("dispatched_tasks") or []
 
     return OpenMetadataWebhookResponse(
         status=res.get("status", "accepted"),

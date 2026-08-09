@@ -164,3 +164,18 @@ def test_partial_dispatch_does_not_republish_successful_purpose(session) -> None
         rec = session.query(EventInbox).filter(EventInbox.event_id == "evt-partial-004").first()
         assert rec.status == "PROCESSED"
         assert set(rec.dispatched_purposes) == {"CLASSIFY", "TAG_SYNC"}
+
+
+def test_openmetadata_route_does_not_wrap_service_owned_transactions() -> None:
+    route_source = (
+        __import__(
+            "pathlib"
+        ).Path("app/api/routes/openmetadata_events.py").read_text()
+    )
+    route_body = route_source.split("def accept_openmetadata_event", 1)[1].split(
+        "@router.post",
+        1,
+    )[0]
+
+    assert "with db.begin()" not in route_body
+    assert "adapter.process_change_event" in route_body

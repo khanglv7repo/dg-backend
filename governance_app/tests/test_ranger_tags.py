@@ -124,3 +124,78 @@ def test_tag_store_creates_resource_tag_and_mapping() -> None:
         method == "POST" and path.endswith("/tagresourcemaps")
         for method, path, _query in requests
     )
+
+
+def test_tag_store_does_not_treat_matching_unmanaged_resource_as_owned() -> None:
+    requests = []
+    resources = [
+        {
+            "id": 30,
+            "guid": "managed-resource",
+            "additionalInfo": {
+                "managedBy": "dg-backend",
+                "openmetadataFqn": "hive.sales.customers",
+                "fieldPath": "columns.email",
+            },
+            "resourceElements": {
+                "table": {"values": ["hive.sales.customers"]},
+                "column": {"values": ["email"]},
+            },
+        },
+        {
+            "id": 31,
+            "guid": "unmanaged-resource",
+            "additionalInfo": {},
+            "resourceElements": {
+                "table": {"values": ["hive.sales.customers"]},
+                "column": {"values": ["phone"]},
+            },
+        },
+    ]
+    tags = [
+        {"id": 20, "guid": "tag-email", "type": "PII.Email"},
+        {"id": 21, "guid": "tag-phone", "type": "PII.Phone"},
+    ]
+    maps = [
+        {"id": 40, "resourceId": 30, "tagId": 20},
+        {"id": 41, "resourceId": 31, "tagId": 21},
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append((request.method, request.url.path))
+        if request.method == "GET" and "/resources/service/" in request.url.path:
+            return httpx.Response(200, json=resources)
+        if request.method == "GET" and request.url.path.endswith("/tags"):
+            return httpx.Response(200, json=tags)
+        if request.method == "GET" and request.url.path.endswith("/tagresourcemaps"):
+            return httpx.Response(200, json=maps)
+        if request.method == "DELETE" and request.url.path.endswith("/tagresourcemaps/40"):
+            return httpx.Response(204)
+        if request.method == "DELETE" and request.url.path.endswith("/tagresourcemaps/41"):
+            return httpx.Response(500, json={"error": "must not delete unmanaged"})
+        return httpx.Response(500, json={"unexpected": str(request.url)})
+
+    client = RangerTagStoreClient(
+        base_url="http://ranger/service/tags",
+        username=None,
+        password=None,
+        resource_service_name="dev_trino",
+        dry_run=False,
+    )
+    client.client.close()
+    client.client = httpx.Client(
+        base_url="http://ranger/service/tags",
+        transport=httpx.MockTransport(handler),
+    )
+
+    removed = client.remove_stale_service_assignments(expected=set())
+
+    assert removed == [
+        {
+            "entity_fqn": "hive.sales.customers",
+            "field_path": "columns.email",
+            "tag": "PII.Email",
+            "map_id": "40",
+        }
+    ]
+    assert ("DELETE", "/service/tags/tagresourcemaps/41") not in requests

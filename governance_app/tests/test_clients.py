@@ -214,6 +214,53 @@ def test_openmetadata_confirmed_tag_snapshot_uses_live_entity_state() -> None:
     }
 
 
+def test_openmetadata_confirmed_snapshot_excludes_explicit_suggested_tags() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/v1/tables/name/hive.sales.customers"):
+            return httpx.Response(
+                200,
+                json={
+                    "id": "table-id",
+                    "columns": [
+                        {
+                            "name": "phone",
+                            "tags": [
+                                {"tagFQN": "PII.Phone", "state": "Confirmed"},
+                                {"tagFQN": "PII.Email", "state": "Suggested"},
+                            ],
+                        }
+                    ],
+                },
+            )
+        return httpx.Response(404)
+
+    client = OpenMetadataClient(base_url="http://openmetadata/api", token=None)
+    client.client.close()
+    client.client = httpx.Client(
+        base_url="http://openmetadata/api",
+        transport=httpx.MockTransport(handler),
+    )
+
+    snapshot = client.get_confirmed_tag_snapshot(
+        entity_type="table",
+        entity_fqn="hive.sales.customers",
+    )
+
+    assert snapshot["field_tags"] == {"columns.phone": ["PII.Phone"]}
+    assert snapshot["tags"] == ["PII.Phone"]
+
+
+def test_openmetadata_confirmed_snapshot_accepts_missing_state_as_confirmed() -> None:
+    client = OpenMetadataClient(base_url="http://openmetadata/api", token=None)
+
+    assert client._confirmed_tag_fqns(
+        [
+            {"tagFQN": "PII.Phone"},
+            {"tagFQN": "PII.Email", "state": "Suggested"},
+        ]
+    ) == ["PII.Phone"]
+
+
 def test_openmetadata_native_tag_suggestion_payload() -> None:
     captured: dict = {}
 
@@ -286,4 +333,3 @@ def test_openmetadata_404_preserves_server_message() -> None:
         "OpenMetadata returned 404 for /v1/tags/name/PII.Address: "
         "tag instance for PII.Address not found"
     )
-

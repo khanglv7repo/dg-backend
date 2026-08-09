@@ -265,12 +265,52 @@ class RangerTagStoreClient:
 
         return actual
 
+    def read_actual_service_state(self) -> set[tuple[str, str, str]]:
+        """Read all Backend-owned Ranger tag mappings for the configured service."""
+        if self.dry_run:
+            return set()
+
+        resources = {
+            int(item["id"]): item
+            for item in self.list_resources()
+            if item.get("id") is not None and self._is_backend_managed_resource(item)
+        }
+        tags = {
+            int(item["id"]): item
+            for item in self.list_tags()
+            if item.get("id") is not None
+        }
+
+        actual: set[tuple[str, str, str]] = set()
+        for mapping in self.list_tag_resource_maps():
+            resource_id = mapping.get("resourceId")
+            tag_id = mapping.get("tagId")
+            if resource_id is None or tag_id is None:
+                continue
+            resource = resources.get(int(resource_id))
+            tag = tags.get(int(tag_id))
+            if resource is None or tag is None:
+                continue
+            entity_fqn = str((resource.get("additionalInfo") or {}).get("openmetadataFqn") or "")
+            field_path = self._field_path_for_resource(resource)
+            tag_type = str(tag.get("type") or "")
+            if entity_fqn and field_path and tag_type:
+                actual.add((entity_fqn, field_path, tag_type))
+        return actual
+
     def compare_state(
         self,
         desired: set[tuple[str, str]],
         actual: set[tuple[str, str]],
     ) -> bool:
         """Pure production semantic comparison between desired and actual state."""
+        return desired == actual
+
+    def compare_service_state(
+        self,
+        desired: set[tuple[str, str, str]],
+        actual: set[tuple[str, str, str]],
+    ) -> bool:
         return desired == actual
 
     def verify_convergence(
@@ -359,6 +399,57 @@ class RangerTagStoreClient:
             "created_or_existing": created_or_existing,
             "removed": removed,
         }
+
+    def remove_stale_service_assignments(
+        self,
+        *,
+        expected: set[tuple[str, str, str]],
+    ) -> list[dict[str, str]]:
+        """Delete stale mappings only from strictly Backend-owned resources."""
+        if self.dry_run:
+            return []
+
+        resources = {
+            int(item["id"]): item
+            for item in self.list_resources()
+            if item.get("id") is not None and self._is_backend_managed_resource(item)
+        }
+        tags = {
+            int(item["id"]): item
+            for item in self.list_tags()
+            if item.get("id") is not None
+        }
+
+        removed: list[dict[str, str]] = []
+        for mapping in self.list_tag_resource_maps():
+            resource_id = mapping.get("resourceId")
+            tag_id = mapping.get("tagId")
+            mapping_id = mapping.get("id")
+            if resource_id is None or tag_id is None or mapping_id is None:
+                continue
+            resource = resources.get(int(resource_id))
+            tag = tags.get(int(tag_id))
+            if resource is None or tag is None:
+                continue
+
+            entity_fqn = str((resource.get("additionalInfo") or {}).get("openmetadataFqn") or "")
+            field_path = self._field_path_for_resource(resource)
+            tag_type = str(tag.get("type") or "")
+            if not entity_fqn or not field_path or not tag_type:
+                continue
+            if (entity_fqn, field_path, tag_type) in expected:
+                continue
+
+            self._request("DELETE", f"/tagresourcemaps/{mapping_id}", allow_404=True)
+            removed.append(
+                {
+                    "entity_fqn": entity_fqn,
+                    "field_path": field_path,
+                    "tag": tag_type,
+                    "map_id": str(mapping_id),
+                }
+            )
+        return removed
 
     def _remove_stale_assignments(
         self,
@@ -501,15 +592,31 @@ class RangerTagStoreClient:
     @staticmethod
     def _is_managed_entity_resource(resource: dict, entity_fqn: str) -> bool:
         info = resource.get("additionalInfo") or {}
-        if str(info.get("managedBy") or "") == "dg-backend" and str(info.get("openmetadataFqn") or "") == entity_fqn:
-            return True
+        return (
+            str(info.get("managedBy") or "") == "dg-backend"
+            and str(info.get("openmetadataFqn") or "") == entity_fqn
+        )
+
+    @staticmethod
+    def _is_backend_managed_resource(resource: dict) -> bool:
+        info = resource.get("additionalInfo") or {}
+        return (
+            str(info.get("managedBy") or "") == "dg-backend"
+            and bool(str(info.get("openmetadataFqn") or "").strip())
+        )
+
+    @classmethod
+    def _field_path_for_resource(cls, resource: dict) -> str:
+        info = resource.get("additionalInfo") or {}
+        field_path = info.get("fieldPath")
+        if field_path:
+            return str(field_path)
 
         elements = resource.get("resourceElements") or {}
-        table_vals = (elements.get("table") or {}).get("values") or []
-        schema_vals = (elements.get("schema") or {}).get("values") or []
-        database_vals = (elements.get("database") or {}).get("values") or []
-
-        return entity_fqn in table_vals or entity_fqn in schema_vals or entity_fqn in database_vals
+        cols = (elements.get("column") or {}).get("values") or []
+        if cols and cols != ["*"]:
+            return f"columns.{cols[0]}"
+        return "$entity"
 
     @staticmethod
     def _normalized_resource_elements(value: Any) -> dict[str, tuple[str, ...]]:

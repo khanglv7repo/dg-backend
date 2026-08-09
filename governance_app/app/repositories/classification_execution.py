@@ -4,6 +4,7 @@ from __future__ import annotations
 import uuid
 from typing import Any
 from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models.classification_execution import ClassificationExecution
@@ -65,19 +66,18 @@ class ClassificationExecutionRepository:
         correlation_id: str | None = None,
     ) -> ClassificationExecution:
         """Create next generation N+1 and mark older unfinished runs SUPERSEDED."""
-        raw_max = (
-            self.session.query(func.max(ClassificationExecution.generation))
-            .filter(ClassificationExecution.entity_fqn == entity_fqn)
-            .scalar()
-        )
-        try:
-            max_gen = int(raw_max) if raw_max is not None else 0
-        except (ValueError, TypeError):
-            max_gen = 0
+        for _attempt in range(3):
+            raw_max = (
+                self.session.query(func.max(ClassificationExecution.generation))
+                .filter(ClassificationExecution.entity_fqn == entity_fqn)
+                .scalar()
+            )
+            try:
+                max_gen = int(raw_max) if raw_max is not None else 0
+            except (ValueError, TypeError):
+                max_gen = 0
 
-        next_gen = max_gen + 1
-
-        try:
+            next_gen = max_gen + 1
             unfinished_records = (
                 self.session.query(ClassificationExecution)
                 .filter(
@@ -88,21 +88,26 @@ class ClassificationExecutionRepository:
             )
             for rec in unfinished_records:
                 rec.status = "SUPERSEDED"
-        except Exception:
-            pass
 
-        return self.create(
-            event_id=event_id,
-            entity_type=entity_type,
-            entity_fqn=entity_fqn,
-            generation=next_gen,
-            status=status,
-            outcome=outcome,
-            rule_version_id=rule_version_id,
-            suggestions=suggestions,
-            evidence=evidence,
-            confidence=confidence,
-            correlation_id=correlation_id,
+            try:
+                return self.create(
+                    event_id=event_id,
+                    entity_type=entity_type,
+                    entity_fqn=entity_fqn,
+                    generation=next_gen,
+                    status=status,
+                    outcome=outcome,
+                    rule_version_id=rule_version_id,
+                    suggestions=suggestions,
+                    evidence=evidence,
+                    confidence=confidence,
+                    correlation_id=correlation_id,
+                )
+            except IntegrityError:
+                self.session.rollback()
+
+        raise RuntimeError(
+            f"could not create unique classification generation for {entity_fqn}"
         )
 
     def is_current_generation(self, execution_id: uuid.UUID | str, generation: int) -> bool:

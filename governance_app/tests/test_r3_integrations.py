@@ -175,22 +175,36 @@ def test_integration_c_ai_fallback_handoff(session) -> None:
 # -----------------------------------------------------------------------------
 # Integration D — OM -> Ranger TAG_SYNC, Apply & Post-Apply Read-Back Verification
 # -----------------------------------------------------------------------------
-def test_integration_d_tag_sync_reconciles_and_verifies_post_apply_readback() -> None:
+def test_integration_d_tag_sync_reconciles_and_verifies_post_apply_readback(session) -> None:
     mock_om_client = MagicMock(spec=OpenMetadataClient, unsafe=True)
-    mock_om_client.get_confirmed_tag_snapshot.return_value = {
-        "entity_tags": ["Sensitivity.Confidential"],
-        "field_tags": {"columns.email": ["PII.Email"]},
-    }
+    mock_om_client.list_confirmed_table_tag_snapshots.return_value = [
+        {
+            "entity_type": "table",
+            "entity_fqn": "trino_prod.sales.customers",
+            "entity_tags": ["Sensitivity.Confidential"],
+            "field_tags": {"columns.email": ["PII.Email"]},
+        }
+    ]
 
     mock_tag_store = create_autospec(RangerTagStoreClient, instance=True)
+    mock_tag_store.dry_run = False
+    mock_tag_store.read_actual_service_state.side_effect = [
+        set(),
+        {
+            ("trino_prod.sales.customers", "$entity", "Sensitivity.Confidential"),
+            ("trino_prod.sales.customers", "columns.email", "PII.Email"),
+        },
+    ]
+    mock_tag_store.compare_service_state.side_effect = [False, True]
     mock_tag_store.reconcile_assignments.return_value = {
         "tags_reconciled": 2,
         "status": "applied",
     }
-    mock_tag_store.verify_convergence.return_value = True
+    mock_tag_store.remove_stale_service_assignments.return_value = []
 
     with patch("app.tasks.tag_sync.OpenMetadataClient", return_value=mock_om_client), \
-         patch("app.tasks.tag_sync.RangerTagStoreClient", return_value=mock_tag_store):
+         patch("app.tasks.tag_sync.RangerTagStoreClient", return_value=mock_tag_store), \
+         patch("app.tasks.tag_sync.SessionLocal", return_value=session):
 
         result = sync_tags_to_ranger(
             entity_type="table",
@@ -201,8 +215,4 @@ def test_integration_d_tag_sync_reconciles_and_verifies_post_apply_readback() ->
         assert result["entity_fqn"] == "trino_prod.sales.customers"
 
         mock_tag_store.reconcile_assignments.assert_called_once()
-        mock_tag_store.verify_convergence.assert_called_once_with(
-            entity_fqn="trino_prod.sales.customers",
-            entity_tags=["Sensitivity.Confidential"],
-            field_tags={"columns.email": ["PII.Email"]},
-        )
+        assert mock_tag_store.read_actual_service_state.call_count == 2

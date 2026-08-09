@@ -87,6 +87,8 @@ class ClassificationRuleVersionRepository:
         for prev in previous_active:
             prev.status = "INACTIVE"
 
+        self.session.flush()
+
         target.status = "ACTIVE"
         target.activated_at = utcnow()
         self.session.flush()

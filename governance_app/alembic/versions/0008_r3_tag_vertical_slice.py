@@ -1,4 +1,4 @@
-"""R3 TAG vertical slice tables: event_inbox, classification_executions, tag_sync_states, classification_rule_versions
+"""R3 TAG vertical slice tables: event_inbox, classification_executions, tag_sync_states
 
 Revision ID: 0008_r3_tag_vertical_slice
 Revises: 0007_classification_rule_sets
@@ -26,8 +26,6 @@ def upgrade() -> None:
         sa.Column('entity_fqn', sa.String(length=1024), nullable=False),
         sa.Column('payload', sa.JSON().with_variant(postgresql.JSONB(astext_type=sa.Text()), 'postgresql'), nullable=False),
         sa.Column('purposes', sa.JSON().with_variant(postgresql.JSONB(astext_type=sa.Text()), 'postgresql'), nullable=False),
-        sa.Column('dispatched_purposes', sa.JSON().with_variant(postgresql.JSONB(astext_type=sa.Text()), 'postgresql'), nullable=False),
-        sa.Column('dispatched_tasks', sa.JSON().with_variant(postgresql.JSONB(astext_type=sa.Text()), 'postgresql'), nullable=False),
         sa.Column('status', sa.String(length=32), nullable=False),
         sa.Column('correlation_id', sa.String(length=128), nullable=True),
         sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
@@ -73,27 +71,8 @@ def upgrade() -> None:
     )
     op.create_index('ix_tag_sync_states_status', 'tag_sync_states', ['status', 'updated_at'], unique=False)
 
-    op.create_table(
-        'classification_rule_versions',
-        sa.Column('id', sa.Uuid(), nullable=False),
-        sa.Column('rule_key', sa.String(length=255), nullable=False),
-        sa.Column('version', sa.Integer(), nullable=False),
-        sa.Column('status', sa.String(length=16), nullable=False),
-        sa.Column('payload', sa.JSON().with_variant(postgresql.JSONB(astext_type=sa.Text()), 'postgresql'), nullable=False),
-        sa.Column('checksum', sa.String(length=64), nullable=False),
-        sa.Column('declared_version', sa.String(length=255), nullable=True),
-        sa.Column('created_by', sa.String(length=255), nullable=False),
-        sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
-        sa.Column('activated_at', sa.DateTime(timezone=True), nullable=True),
-        sa.PrimaryKeyConstraint('id'),
-        sa.UniqueConstraint('rule_key', 'version', name='uq_classification_rule_version_key_ver')
-    )
-    op.create_index('ix_classification_rule_versions_key_status', 'classification_rule_versions', ['rule_key', 'status'], unique=False)
-
 
 def downgrade() -> None:
-    op.drop_index('ix_classification_rule_versions_key_status', table_name='classification_rule_versions')
-    op.drop_table('classification_rule_versions')
     op.drop_index('ix_tag_sync_states_status', table_name='tag_sync_states')
     op.drop_table('tag_sync_states')
     op.drop_index('ix_classification_executions_status', table_name='classification_executions')

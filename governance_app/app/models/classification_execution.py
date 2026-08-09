@@ -15,7 +15,11 @@ class ClassificationExecution(Base):
 
     __tablename__ = "classification_executions"
     __table_args__ = (
-        UniqueConstraint("event_id", "entity_fqn", "generation", name="uq_classification_execution_gen"),
+        UniqueConstraint(
+            "entity_fqn",
+            "generation",
+            name="uq_classification_execution_entity_generation",
+        ),
         Index("ix_classification_executions_entity", "entity_fqn", "created_at"),
         Index("ix_classification_executions_status", "status", "created_at"),
     )
