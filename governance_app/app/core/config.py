@@ -22,7 +22,7 @@ DEFAULT_IN_MEMORY_DATABASE_URL = "sqlite+pysqlite://"
 
 
 class Settings(BaseSettings):
-    """Runtime configuration for the FastAPI API and execution worker."""
+    """Runtime configuration for Backend API, MCP, and execution workers."""
 
     model_config = SettingsConfigDict(
         env_file=ENVIRONMENT_FILE_PATH,
@@ -41,6 +41,14 @@ class Settings(BaseSettings):
     app_log_level: str = "INFO"
     api_prefix: str = "/api/v1"
     database_url: str = DEFAULT_IN_MEMORY_DATABASE_URL
+
+    # R5 Backend MCP is a separate process/transport over the same application layer.
+    mcp_enabled: bool = False
+    mcp_host: str = "127.0.0.1"
+    mcp_port: int = Field(default=8001, ge=1, le=65535)
+    mcp_path: str = "/mcp"
+    mcp_actor_id: str = "backend-mcp"
+    mcp_actor_name: str = "Backend MCP"
 
     openmetadata_enabled: bool = False
     openmetadata_base_url: str = "http://localhost:8585/api"
@@ -93,6 +101,61 @@ class Settings(BaseSettings):
     ranger_dry_run: bool = True
     ranger_timeout_seconds: float = 15.0
 
+    # R5 diagnostic-only Trino account. Legacy lab TRINO_* env names stay usable.
+    trino_readonly_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("TRINO_READONLY_ENABLED", "TRINO_ENABLED"),
+    )
+    trino_readonly_host: str = Field(
+        default="localhost",
+        validation_alias=AliasChoices("TRINO_READONLY_HOST", "TRINO_HOST"),
+    )
+    trino_readonly_port: int = Field(
+        default=8080,
+        ge=1,
+        le=65535,
+        validation_alias=AliasChoices("TRINO_READONLY_PORT", "TRINO_PORT"),
+    )
+    trino_readonly_http_scheme: Literal["http", "https"] = Field(
+        default="http",
+        validation_alias=AliasChoices(
+            "TRINO_READONLY_HTTP_SCHEME",
+            "TRINO_HTTP_SCHEME",
+        ),
+    )
+    trino_readonly_user: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "TRINO_READONLY_USER",
+            "TRINO_VERIFICATION_SERVICE_USER",
+        ),
+    )
+    trino_readonly_password: SecretStr | None = None
+    trino_readonly_catalog: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("TRINO_READONLY_CATALOG", "TRINO_CATALOG"),
+    )
+    trino_readonly_schema: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("TRINO_READONLY_SCHEMA", "TRINO_SCHEMA"),
+    )
+    trino_readonly_timeout_seconds: float = Field(
+        default=20.0,
+        gt=0,
+        le=300,
+        validation_alias=AliasChoices(
+            "TRINO_READONLY_TIMEOUT_SECONDS",
+            "TRINO_TIMEOUT_SECONDS",
+        ),
+    )
+    trino_readonly_max_rows: int = Field(default=100, ge=1, le=1000)
+    trino_readonly_max_columns: int = Field(default=100, ge=1, le=500)
+    trino_readonly_max_response_bytes: int = Field(
+        default=262_144,
+        ge=4096,
+        le=2_097_152,
+    )
+
     openmetadata_webhook_secret: SecretStr | None = None
 
     auto_start_execution_worker: bool = True
@@ -111,13 +174,21 @@ class Settings(BaseSettings):
 
     trusted_identity_headers: bool = True
 
-    @field_validator("api_prefix")
+    @field_validator("api_prefix", "mcp_path")
     @classmethod
-    def validate_prefix(
+    def validate_path_prefix(
         cls,
         value: str,
     ) -> str:
         return "/" + value.strip("/")
+
+    @field_validator("mcp_actor_id", "mcp_actor_name")
+    @classmethod
+    def validate_mcp_actor(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("MCP actor identity fields must not be empty")
+        return normalized
 
     @model_validator(mode="after")
     def validate_machine_identity_separation(

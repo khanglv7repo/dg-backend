@@ -1,4 +1,4 @@
-.PHONY: install test api execution-worker migrate lint verify-openapi celery-worker worker-tag-sync celery-beat
+.PHONY: install test api mcp-server execution-worker migrate lint verify-openapi celery-worker worker-tag-sync celery-beat
 
 install:
 	python -m pip install -e '.[dev,postgres,trino]'
@@ -8,6 +8,9 @@ test:
 
 api:
 	uvicorn app.main:app --reload
+
+mcp-server:
+	MCP_ENABLED=true python -m app.mcp.backend_mcp_server
 
 execution-worker:
 	python -m app.workers.execution_worker

@@ -1,3 +1,1 @@
-from app.mcp.backend_mcp_server import mcp
-
-__all__ = ["mcp"]
+"""Backend MCP transport adapters for R5."""

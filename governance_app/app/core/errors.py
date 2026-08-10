@@ -29,6 +29,12 @@ class AuthorizationError(GovernanceError):
     code = "FORBIDDEN"
 
 
+class ControlConfirmationError(GovernanceError):
+    """Explicit MCP workflow guard; this is not an authentication assertion."""
+
+    code = "CONFIRMATION_REQUIRED"
+
+
 class ConfigurationError(GovernanceError):
     code = "CONFIGURATION_ERROR"
 

@@ -15,6 +15,7 @@ from app.schemas.data_access_policy import (
     RollbackPolicyRequest,
 )
 from app.services.data_access_policy import DataAccessPolicyService
+from app.services.policy_lifecycle import PolicyLifecycleService
 from app.services.ranger_client_factory import build_resource_ranger_client
 from app.tasks.policy_sync import sync_policy_to_ranger
 
@@ -33,9 +34,11 @@ def _require_admin(actor) -> None:
         raise AuthorizationError("governance-admin role is required")
 
 
-def _dispatch(version_id: str, correlation_id: str | None = None) -> None:
+def _dispatch(version_id: str, correlation_id: str | None = None) -> str | None:
+    """REST-compatible dispatcher retained as an injectable lifecycle dependency."""
+
     try:
-        sync_policy_to_ranger.delay(
+        task = sync_policy_to_ranger.delay(
             policy_version_id=version_id,
             correlation_id=correlation_id,
         )
@@ -47,6 +50,7 @@ def _dispatch(version_id: str, correlation_id: str | None = None) -> None:
             retryable=True,
             details={"policy_version_id": version_id},
         ) from exc
+    return str(task.id) if getattr(task, "id", None) else None
 
 
 @router.post(
@@ -147,36 +151,22 @@ def activate_policy_version(
     _require_admin(actor)
     ranger = build_resource_ranger_client(settings)
     try:
-        with db.begin():
-            target = DataAccessPolicyService(db, settings).read_activation_target(
-                policy_key=policy_key,
-                version=version,
-            )
-        validation = DataAccessPolicyService(
+        result = PolicyLifecycleService(
             db,
             settings,
             ranger_client=ranger,
-        ).validate_activation_subjects(target)
-
-        # TX2: ACTIVE transition + desired projection state only.
-        with db.begin():
-            selected, _changed = DataAccessPolicyService(
-                db,
-                settings,
-            ).activate_version(
-                validation=validation,
-                actor_id=actor.subject,
-                actor_name=actor.display_name,
-            )
-        version_id = str(selected.id)
-        response_version = PolicyVersionResponse.model_validate(selected)
+            dispatcher=_dispatch,
+        ).activate(
+            policy_key=policy_key,
+            version=version,
+            actor_id=actor.subject,
+            actor_name=actor.display_name,
+        )
+        response_version = PolicyVersionResponse.model_validate(result.version)
     finally:
         ranger.close()
 
-    # Publish only after TX1 has committed. The task carries durable identity,
-    # never compiled/native Ranger JSON.
-    _dispatch(version_id)
-    return ActivationResponse(version=response_version, dispatched=True)
+    return ActivationResponse(version=response_version, dispatched=result.dispatched)
 
 
 @router.post(
@@ -194,35 +184,22 @@ def rollback_policy(
     _require_admin(actor)
     ranger = build_resource_ranger_client(settings)
     try:
-        with db.begin():
-            target = DataAccessPolicyService(db, settings).read_rollback_target(
-                policy_key=policy_key,
-                target_version=request.target_version,
-            )
-        validation = DataAccessPolicyService(
+        result = PolicyLifecycleService(
             db,
             settings,
             ranger_client=ranger,
-        ).validate_activation_subjects(target)
-
-        with db.begin():
-            selected, _changed = DataAccessPolicyService(
-                db,
-                settings,
-            ).rollback(
-                policy_key=policy_key,
-                target_version=request.target_version,
-                actor_id=actor.subject,
-                actor_name=actor.display_name,
-                validation=validation,
-            )
-        version_id = str(selected.id)
-        response_version = PolicyVersionResponse.model_validate(selected)
+            dispatcher=_dispatch,
+        ).rollback(
+            policy_key=policy_key,
+            target_version=request.target_version,
+            actor_id=actor.subject,
+            actor_name=actor.display_name,
+        )
+        response_version = PolicyVersionResponse.model_validate(result.version)
     finally:
         ranger.close()
 
-    _dispatch(version_id)
-    return ActivationResponse(version=response_version, dispatched=True)
+    return ActivationResponse(version=response_version, dispatched=result.dispatched)
 
 
 @router.get(
