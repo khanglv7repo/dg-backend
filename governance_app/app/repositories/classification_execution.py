@@ -20,6 +20,20 @@ class ClassificationExecutionRepository:
             execution_id = uuid.UUID(execution_id)
         return self.session.get(ClassificationExecution, execution_id)
 
+    def get_for_update(
+        self,
+        execution_id: uuid.UUID | str,
+    ) -> ClassificationExecution | None:
+        """Lock one execution row for a generation-fenced state transition."""
+        if isinstance(execution_id, str):
+            execution_id = uuid.UUID(execution_id)
+        return (
+            self.session.query(ClassificationExecution)
+            .filter(ClassificationExecution.id == execution_id)
+            .with_for_update()
+            .one_or_none()
+        )
+
     def get_by_event_entity(
         self,
         *,
@@ -180,20 +194,27 @@ class ClassificationExecutionRepository:
             f"could not create unique classification generation for {entity_fqn}"
         )
 
+    def current_generation(self, entity_fqn: str) -> int | None:
+        raw_max = (
+            self.session.query(func.max(ClassificationExecution.generation))
+            .filter(ClassificationExecution.entity_fqn == entity_fqn)
+            .scalar()
+        )
+        if raw_max is None:
+            return None
+        try:
+            return int(raw_max)
+        except (ValueError, TypeError):
+            return None
+
     def is_current_generation(self, execution_id: uuid.UUID | str, generation: int) -> bool:
         """Stale write guard: returns True if execution_id is current generation and active."""
         record = self.get(execution_id)
         if not record or record.status == "SUPERSEDED":
             return False
 
-        raw_max = (
-            self.session.query(func.max(ClassificationExecution.generation))
-            .filter(ClassificationExecution.entity_fqn == record.entity_fqn)
-            .scalar()
-        )
-        try:
-            max_gen = int(raw_max) if raw_max is not None else record.generation
-        except (ValueError, TypeError):
+        max_gen = self.current_generation(record.entity_fqn)
+        if max_gen is None:
             max_gen = record.generation
 
         return record.generation == max_gen and record.generation == generation
@@ -206,6 +227,7 @@ class ClassificationExecutionRepository:
         outcome: str | None = None,
         suggestions: list[dict[str, Any]] | None = None,
         evidence: dict[str, Any] | None = None,
+        confidence: float | None = None,
     ) -> ClassificationExecution:
         record = self.get(execution_id)
         if not record:
@@ -217,5 +239,7 @@ class ClassificationExecutionRepository:
             record.suggestions = suggestions
         if evidence is not None:
             record.evidence = evidence
+        if confidence is not None:
+            record.confidence = confidence
         self.session.flush()
         return record

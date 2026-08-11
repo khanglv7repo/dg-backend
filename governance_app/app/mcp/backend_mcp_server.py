@@ -17,6 +17,7 @@ from app.core.errors import (
 )
 from app.db.session import SessionLocal
 from app.services.audit_query import AuditQueryService
+from app.services.classification_completion import ClassificationCompletionService
 from app.services.data_access_policy import DataAccessPolicyService
 from app.services.policy_lifecycle import PolicyLifecycleService
 from app.services.policy_query import PolicyQueryService
@@ -511,6 +512,39 @@ def request_ranger_sync(policy_key: str) -> dict[str, Any]:
                     policy_key=policy_key
                 )
             )
+    except GovernanceError as exc:
+        raise _tool_error(exc) from None
+    except Exception:
+        raise _internal_tool_error() from None
+
+
+@mcp.tool
+def complete_classification_execution(
+    execution_id: str,
+    generation: int,
+    status: Literal["COMPLETED", "NO_PROPOSAL"],
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    """Generation-fenced completion of one already-dispatched WAITING_AI execution.
+
+    This extends the frozen R5 MCP contract for R6-B. It does not create new
+    governance intent and therefore does not require confirmed=true.
+    """
+
+    try:
+        settings = get_settings()
+        actor_id, actor_name = _actor(settings)
+        with SessionLocal() as db:
+            with db.begin():
+                response = ClassificationCompletionService(db).complete(
+                    execution_id=execution_id,
+                    generation=generation,
+                    status=status,
+                    result=result,
+                    actor_id=actor_id,
+                    actor_name=actor_name,
+                )
+            return _result(response)
     except GovernanceError as exc:
         raise _tool_error(exc) from None
     except Exception:

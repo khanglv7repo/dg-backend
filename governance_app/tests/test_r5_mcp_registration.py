@@ -7,7 +7,7 @@ from fastmcp import Client
 
 from app.mcp.backend_mcp_server import mcp
 
-EXPECTED_TOOLS = [
+R5_FROZEN_TOOLS = [
     "get_policy",
     "list_policy_versions",
     "preview_policy_change",
@@ -25,12 +25,16 @@ EXPECTED_TOOLS = [
     "request_ranger_sync",
 ]
 
+R6B_TOOLS = [*R5_FROZEN_TOOLS, "complete_classification_execution"]
 
-def test_actual_fastmcp_protocol_lists_exact_r5_tools_and_json_schemas() -> None:
+
+def test_actual_fastmcp_protocol_preserves_r5_and_adds_r6b_completion_tool() -> None:
     async def run() -> None:
         async with Client(mcp) as client:
             tools = await client.list_tools()
-            assert [tool.name for tool in tools] == EXPECTED_TOOLS
+            names = [tool.name for tool in tools]
+            assert names == R6B_TOOLS
+            assert names[: len(R5_FROZEN_TOOLS)] == R5_FROZEN_TOOLS
             assert client.initialize_result is not None
             assert client.initialize_result.serverInfo.name
             for tool in tools:
