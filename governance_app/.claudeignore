@@ -1,0 +1,16 @@
+# Python venv và cache
+.venv/
+venv/
+env/
+__pycache__/
+*.pyc
+
+# Node.js (nếu có)
+node_modules/
+
+# Các file dữ liệu, logs, cấu hình bảo mật nặng
+*.log
+*.csv
+*.json
+*.sqlite3
+.git/

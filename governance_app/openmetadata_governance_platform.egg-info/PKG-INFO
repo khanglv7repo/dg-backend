@@ -14,7 +14,7 @@ Requires-Dist: httpx>=0.27
 Requires-Dist: python-multipart>=0.0.9
 Requires-Dist: celery[redis]>=5.4
 Requires-Dist: redis>=5.0
-Requires-Dist: fastmcp<3,>=2.14.7
+Requires-Dist: fastmcp<2.15,>=2.14.7
 Provides-Extra: postgres
 Requires-Dist: psycopg[binary]>=3.2; extra == "postgres"
 Provides-Extra: trino

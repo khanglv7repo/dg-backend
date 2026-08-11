@@ -85,15 +85,40 @@ If the API is exposed beyond a trusted local/proxy boundary, configure real auth
 
 ## Start
 
+For local development, use the Backend launcher:
+
 ```bash
 conda activate dg_backend
 alembic upgrade head
-pytest -q
 
-python -m uvicorn app.main:app \
-  --reload \
-  --host 127.0.0.1 \
-  --port 8000
+make dev
+```
+
+`make dev` starts three separate local processes and supervises them together:
+
+```text
+FastAPI API       http://127.0.0.1:8000
+Backend FastMCP   http://127.0.0.1:8001/mcp
+Celery worker     queue=default
+```
+
+`Ctrl+C` stops the whole local stack. The launcher uses `python -m celery`, so it
+does not depend on a separate `celery` console script being present in the
+Conda environment.
+
+Celery Beat stays opt-in to avoid duplicate schedulers during local development:
+
+```bash
+DEV_START_CELERY_BEAT=1 make dev
+```
+
+The individual targets remain available for focused debugging:
+
+```bash
+make api
+make mcp-server
+make celery-worker
+make celery-beat
 ```
 
 The API may auto-start the execution worker according to `AUTO_START_EXECUTION_WORKER`. Startup does not auto-sync Ranger policies.
