@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from copy import deepcopy
 
 import httpx
@@ -183,3 +184,216 @@ def test_unmanaged_or_other_key_policy_is_never_mutated(description: str) -> Non
     finally:
         client.close()
     assert methods == ["GET"]
+
+
+def test_same_policy_key_old_name_collision_is_renamed_by_owned_id() -> None:
+    desired = {**base_policy(), "name": "dg-r4-sales-access-new"}
+    old = owned({**desired, "name": "dg-r4-sales-access-old"}, policy_key="policy-A")
+    old["id"] = 43
+    methods: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        methods.append((request.method, request.url.path))
+        if request.method == "GET" and request.url.path.endswith(
+            "/service/dev_trino/policy/dg-r4-sales-access-new"
+        ):
+            return httpx.Response(404, json={"message": "not found"})
+        if request.method == "GET" and request.url.path.endswith(
+            "/service/dev_trino/policy"
+        ):
+            return httpx.Response(200, json=[old])
+        if request.method == "PUT" and request.url.path.endswith("/policy/43"):
+            payload = request.read().decode()
+            assert '"id":43' in payload
+            assert '"name":"dg-r4-sales-access-new"' in payload
+            assert "policy-key=policy-A" in payload
+            return httpx.Response(200, json={**desired, "id": 43})
+        raise AssertionError(f"unexpected request {request.method} {request.url.path}")
+
+    client = client_with_handler(handler)
+    try:
+        result = client.reconcile_document(
+            policy_key="policy-A",
+            document=desired,
+        )
+    finally:
+        client.close()
+
+    assert result["action"] == "UPDATE"
+    assert result["policy_id"] == "43"
+    assert result["document"]["name"] == "dg-r4-sales-access-new"
+    assert [method for method, _path in methods] == ["GET", "GET", "PUT"]
+
+
+def test_unmanaged_old_name_collision_is_zero_write() -> None:
+    desired = {**base_policy(), "name": "dg-r4-sales-access-new"}
+    unmanaged = {**desired, "id": 99, "name": "human-created-policy"}
+    unmanaged["description"] = "manual policy"
+    writes: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path.endswith(
+            "/service/dev_trino/policy/dg-r4-sales-access-new"
+        ):
+            return httpx.Response(404, json={"message": "not found"})
+        if request.method == "GET" and request.url.path.endswith(
+            "/service/dev_trino/policy"
+        ):
+            return httpx.Response(200, json=[unmanaged])
+        writes.append(request.method)
+        raise AssertionError("write must not be attempted")
+
+    client = client_with_handler(handler)
+    try:
+        with pytest.raises(ExternalSystemError, match="not owned"):
+            client.reconcile_document(
+                policy_key="policy-A",
+                document=desired,
+            )
+    finally:
+        client.close()
+
+    assert writes == []
+
+
+def test_other_policy_key_old_name_collision_is_zero_write() -> None:
+    desired = {**base_policy(), "name": "dg-r4-sales-access-new"}
+    other = owned({**desired, "name": "other-backend-policy"}, policy_key="policy-B")
+    writes: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path.endswith(
+            "/service/dev_trino/policy/dg-r4-sales-access-new"
+        ):
+            return httpx.Response(404, json={"message": "not found"})
+        if request.method == "GET" and request.url.path.endswith(
+            "/service/dev_trino/policy"
+        ):
+            return httpx.Response(200, json=[other])
+        writes.append(request.method)
+        raise AssertionError("write must not be attempted")
+
+    client = client_with_handler(handler)
+    try:
+        with pytest.raises(ExternalSystemError, match="not owned"):
+            client.reconcile_document(
+                policy_key="policy-A",
+                document=desired,
+            )
+    finally:
+        client.close()
+
+    assert writes == []
+
+
+def test_no_runtime_collision_creates_with_policy_apply() -> None:
+    desired = {**base_policy(), "name": "dg-r4-sales-access-new"}
+    unrelated = {
+        **base_policy(),
+        "id": 88,
+        "name": "unrelated-policy",
+        "resources": {
+            **base_policy()["resources"],
+            "table": {"values": ["orders"], "isExcludes": False, "isRecursive": False},
+        },
+    }
+    writes: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path.endswith(
+            "/service/dev_trino/policy/dg-r4-sales-access-new"
+        ):
+            return httpx.Response(404, json={"message": "not found"})
+        if request.method == "GET" and request.url.path.endswith(
+            "/service/dev_trino/policy"
+        ):
+            return httpx.Response(200, json=[unrelated])
+        if request.method == "POST" and request.url.path.endswith("/policy/apply"):
+            writes.append("POST")
+            payload = json.loads(request.content)
+            assert payload["name"] == "dg-r4-sales-access-new"
+            return httpx.Response(200, json={**payload, "id": 144})
+        raise AssertionError(f"unexpected request {request.method} {request.url.path}")
+
+    client = client_with_handler(handler)
+    try:
+        result = client.reconcile_document(
+            policy_key="policy-A",
+            document=desired,
+        )
+    finally:
+        client.close()
+
+    assert result["action"] == "CREATE"
+    assert result["policy_id"] == "144"
+    assert writes == ["POST"]
+
+
+def test_multiple_runtime_collision_candidates_fail_closed_zero_write() -> None:
+    desired = {**base_policy(), "name": "dg-r4-sales-access-new"}
+    first = owned({**desired, "name": "old-a"}, policy_key="policy-A")
+    second = owned({**desired, "name": "old-b"}, policy_key="policy-A")
+    second["id"] = 202
+    writes: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path.endswith(
+            "/service/dev_trino/policy/dg-r4-sales-access-new"
+        ):
+            return httpx.Response(404, json={"message": "not found"})
+        if request.method == "GET" and request.url.path.endswith(
+            "/service/dev_trino/policy"
+        ):
+            return httpx.Response(200, json=[first, second])
+        writes.append(request.method)
+        raise AssertionError("write must not be attempted")
+
+    client = client_with_handler(handler)
+    try:
+        with pytest.raises(ExternalSystemError, match="multiple runtime-equivalent"):
+            client.reconcile_document(
+                policy_key="policy-A",
+                document=desired,
+            )
+    finally:
+        client.close()
+
+    assert writes == []
+
+
+def test_different_policy_type_collision_is_not_hijacked() -> None:
+    desired = {**base_policy(), "name": "dg-r4-sales-access-new", "policyType": 0}
+    mask = owned(
+        {**desired, "name": "existing-mask-policy", "policyType": 1},
+        policy_key="policy-B",
+    )
+    writes: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path.endswith(
+            "/service/dev_trino/policy/dg-r4-sales-access-new"
+        ):
+            return httpx.Response(404, json={"message": "not found"})
+        if request.method == "GET" and request.url.path.endswith(
+            "/service/dev_trino/policy"
+        ):
+            return httpx.Response(200, json=[mask])
+        if request.method == "POST" and request.url.path.endswith("/policy/apply"):
+            writes.append(("POST", request.url.path))
+            payload = json.loads(request.content)
+            return httpx.Response(200, json={**payload, "id": 155})
+        writes.append((request.method, request.url.path))
+        raise AssertionError("different policyType must not be updated")
+
+    client = client_with_handler(handler)
+    try:
+        result = client.reconcile_document(
+            policy_key="policy-A",
+            document=desired,
+        )
+    finally:
+        client.close()
+
+    assert result["action"] == "CREATE"
+    assert result["policy_id"] == "155"
+    assert writes == [("POST", "/service/public/v2/api/policy/apply")]

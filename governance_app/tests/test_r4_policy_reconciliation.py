@@ -44,6 +44,11 @@ class RangerTransport:
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
+        if request.method == "GET" and path.endswith("/service/dev_trino/policy"):
+            return httpx.Response(
+                200,
+                json=[deepcopy(policy) for policy in self.policies.values()],
+            )
         if request.method == "GET" and "/service/dev_trino/policy/" in path:
             name = path.rsplit("/", 1)[-1]
             policy = self.policies.get(name)

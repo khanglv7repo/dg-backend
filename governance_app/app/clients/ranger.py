@@ -113,6 +113,22 @@ def _marker_value(value: object, *, field: str) -> str:
     return text
 
 
+def _runtime_collision_key(document: dict | None) -> str | None:
+    normalized = normalize_policy(document) or {}
+    service = normalized.get("service")
+    policy_type = normalized.get("policyType")
+    resources = normalized.get("resources")
+    if not service or policy_type is None or not isinstance(resources, dict):
+        return None
+    return canonical_hash(
+        {
+            "service": service,
+            "policyType": policy_type,
+            "resources": resources,
+        }
+    )
+
+
 class RangerClient:
     def __init__(
         self,
@@ -217,6 +233,43 @@ class RangerClient:
         safe_key = _marker_value(policy_key, field="policy-key")
         marker = f"managed-by=dg-backend;policy-key={safe_key};"
         return marker in str(document.get("description") or "")
+
+    def _runtime_collision_candidates(self, clean: dict) -> list[dict]:
+        desired_key = _runtime_collision_key(clean)
+        if desired_key is None:
+            return []
+        return [
+            policy
+            for policy in self.list_policies()
+            if _runtime_collision_key(policy) == desired_key
+        ]
+
+    def _owned_runtime_collision_candidate(
+        self,
+        *,
+        clean: dict,
+        policy_key: str,
+        name: str,
+    ) -> dict | None:
+        candidates = self._runtime_collision_candidates(clean)
+        if not candidates:
+            return None
+        if len(candidates) > 1:
+            raise ExternalSystemError(
+                f"Ranger has multiple runtime-equivalent policies for {name!r}; "
+                "refusing mutation",
+                system="ranger",
+                retryable=False,
+            )
+        candidate = candidates[0]
+        if not self.owns_policy(candidate, policy_key=policy_key):
+            raise ExternalSystemError(
+                f"Ranger runtime-equivalent policy {candidate.get('name')!r} "
+                f"is not owned by policy {policy_key!r}; refusing mutation",
+                system="ranger",
+                retryable=False,
+            )
+        return candidate
 
     def reconcile_document(
         self,
@@ -331,14 +384,26 @@ class RangerClient:
                 "document": outbound,
             }
 
+        collision = None
         if existing is None:
+            collision = self._owned_runtime_collision_candidate(
+                clean=clean,
+                policy_key=safe_policy_key,
+                name=name,
+            )
+
+        if existing is None and collision is None:
             created = self._request("POST", "/policy/apply", json=outbound)
-            if created and isinstance(created, dict) and created.get("name") != name and created.get("id"):
-                policy_id = created["id"]
-                created = self._request(
-                    "PUT",
-                    f"/policy/{policy_id}",
-                    json={**outbound, "id": policy_id},
+            if (
+                created
+                and isinstance(created, dict)
+                and created.get("name") != name
+            ):
+                raise ExternalSystemError(
+                    f"Ranger /policy/apply returned policy {created.get('name')!r} "
+                    f"instead of {name!r} without pre-write ownership proof",
+                    system="ranger",
+                    retryable=False,
                 )
             return {
                 "action": ReconciliationAction.CREATE.value,
@@ -347,6 +412,10 @@ class RangerClient:
                 "policy_id": str(created.get("id")),
                 "document": created,
             }
+
+        if existing is None:
+            existing = collision
+            observed_hash = canonical_hash(normalize_policy(existing) or {})
 
         policy_id = existing.get("id")
         if policy_id is None:
