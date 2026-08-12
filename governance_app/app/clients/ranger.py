@@ -333,6 +333,13 @@ class RangerClient:
 
         if existing is None:
             created = self._request("POST", "/policy/apply", json=outbound)
+            if created and isinstance(created, dict) and created.get("name") != name and created.get("id"):
+                policy_id = created["id"]
+                created = self._request(
+                    "PUT",
+                    f"/policy/{policy_id}",
+                    json={**outbound, "id": policy_id},
+                )
             return {
                 "action": ReconciliationAction.CREATE.value,
                 "desired_hash": desired_hash,
