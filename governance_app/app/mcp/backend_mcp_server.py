@@ -22,8 +22,12 @@ from app.services.data_access_policy import DataAccessPolicyService
 from app.services.policy_lifecycle import PolicyLifecycleService
 from app.services.policy_query import PolicyQueryService
 from app.services.ranger_client_factory import build_resource_ranger_client
-from app.services.ranger_inspection import RangerInspectionService
+from app.services.ranger_inspection import (
+    RangerInspectionService,
+    create_ranger_tag_store_client,
+)
 from app.services.service_mapping import ServiceMappingService
+from app.services.tag_sync_observability import TagSyncObservabilityService
 from app.services.trino_readonly import TrinoReadonlyService
 from app.services.workflow_query import WorkflowQueryService
 
@@ -549,6 +553,33 @@ def complete_classification_execution(
         raise _tool_error(exc) from None
     except Exception:
         raise _internal_tool_error() from None
+
+
+@mcp.tool
+def get_tag_sync_observability(
+    entity_type: str,
+    entity_fqn: str,
+) -> dict[str, Any]:
+    """Read bounded webhook, TAG_SYNC, and Ranger tag convergence evidence for one entity."""
+
+    tag_store = None
+    try:
+        settings = get_settings()
+        tag_store = create_ranger_tag_store_client(settings)
+        with SessionLocal() as db:
+            return _result(
+                TagSyncObservabilityService(db, tag_store=tag_store).inspect(
+                    entity_type=entity_type.strip(),
+                    entity_fqn=entity_fqn.strip(),
+                )
+            )
+    except GovernanceError as exc:
+        raise _tool_error(exc) from None
+    except Exception:
+        raise _internal_tool_error() from None
+    finally:
+        if tag_store is not None:
+            tag_store.close()
 
 
 def run() -> None:

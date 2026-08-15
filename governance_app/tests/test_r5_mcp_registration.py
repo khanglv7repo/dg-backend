@@ -25,10 +25,14 @@ R5_FROZEN_TOOLS = [
     "request_ranger_sync",
 ]
 
-R6B_TOOLS = [*R5_FROZEN_TOOLS, "complete_classification_execution"]
+R6B_TOOLS = [
+    *R5_FROZEN_TOOLS,
+    "complete_classification_execution",
+    "get_tag_sync_observability",
+]
 
 
-def test_actual_fastmcp_protocol_preserves_r5_and_adds_r6b_completion_tool() -> None:
+def test_actual_fastmcp_protocol_preserves_existing_tools_and_adds_tag_sync_observability() -> None:
     async def run() -> None:
         async with Client(mcp) as client:
             tools = await client.list_tools()
