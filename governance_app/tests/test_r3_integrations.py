@@ -588,6 +588,11 @@ def test_integration_d_tag_sync_reconciles_and_verifies_post_apply_readback(sess
         },
     ]
     mock_tag_store.compare_service_state.side_effect = [False, True]
+    mock_tag_store.compare_state.return_value = True
+    mock_tag_store.read_actual_state.return_value = {
+        ("$entity", "Sensitivity.Confidential"),
+        ("columns.email", "PII.Email"),
+    }
     mock_tag_store.reconcile_assignments.return_value = {
         "tags_reconciled": 2,
         "status": "applied",
@@ -608,3 +613,6 @@ def test_integration_d_tag_sync_reconciles_and_verifies_post_apply_readback(sess
 
         mock_tag_store.reconcile_assignments.assert_called_once()
         assert mock_tag_store.read_actual_service_state.call_count == 2
+        mock_tag_store.read_actual_state.assert_called_once_with(
+            "trino_prod.sales.customers"
+        )

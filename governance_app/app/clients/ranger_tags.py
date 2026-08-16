@@ -265,6 +265,7 @@ class RangerTagStoreClient:
         self,
         *,
         resource_scope: set[tuple[str, str]] | None = None,
+        entity_scope: set[str] | None = None,
     ) -> set[tuple[str, str, str]]:
         """Read all Backend-owned Ranger tag mappings for the configured service."""
         if self.dry_run:
@@ -299,6 +300,8 @@ class RangerTagStoreClient:
                     continue
                 if resource_scope is None or (entity_fqn, field_path) not in resource_scope:
                     continue
+            elif entity_scope is not None and entity_fqn not in entity_scope:
+                continue
             tag_type = str(tag.get("type") or "")
             if entity_fqn and field_path and tag_type:
                 actual.add((entity_fqn, field_path, tag_type))
@@ -411,6 +414,7 @@ class RangerTagStoreClient:
         *,
         expected: set[tuple[str, str, str]],
         resource_scope: set[tuple[str, str]] | None = None,
+        entity_scope: set[str] | None = None,
     ) -> list[dict[str, str]]:
         """Delete stale mappings only from strictly Backend-owned resources."""
         if self.dry_run:
@@ -446,6 +450,8 @@ class RangerTagStoreClient:
                     continue
                 if resource_scope is None or (entity_fqn, field_path) not in resource_scope:
                     continue
+            elif entity_scope is not None and entity_fqn not in entity_scope:
+                continue
             tag_type = str(tag.get("type") or "")
             if not entity_fqn or not field_path or not tag_type:
                 continue
