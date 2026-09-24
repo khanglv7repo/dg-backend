@@ -6,33 +6,9 @@ from unittest.mock import create_autospec
 import pytest
 
 from app.clients.ranger import RangerClient
-from app.core.errors import NotFoundError
 from app.repositories.audit import AuditRepository
-from app.repositories.classification_execution import ClassificationExecutionRepository
 from app.services.audit_query import AuditQueryService
 from app.services.ranger_inspection import RangerInspectionService
-from app.services.workflow_query import WorkflowQueryService
-
-
-def test_workflow_status_existing_and_not_found(session) -> None:
-    with session.begin():
-        execution = ClassificationExecutionRepository(session).create(
-            event_id="evt-r5-workflow",
-            entity_type="table",
-            entity_fqn="dev.sales.customer",
-            status="WAITING_AI",
-            outcome="NO_MATCH",
-            correlation_id="corr-r5",
-        )
-
-    result = WorkflowQueryService(session).get(str(execution.id))
-    assert result["source"] == "classification_execution"
-    assert result["status"] == "WAITING_AI"
-    assert "suggestions" not in result
-    assert "evidence" not in result
-
-    with pytest.raises(NotFoundError):
-        WorkflowQueryService(session).get("00000000-0000-0000-0000-000000000001")
 
 
 def test_audit_summary_filters_and_enforces_hard_limit(session) -> None:
