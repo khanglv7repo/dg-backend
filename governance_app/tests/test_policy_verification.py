@@ -1,0 +1,191 @@
+from __future__ import annotations
+
+from datetime import timedelta
+
+from app.core.config import Settings
+from app.core.errors import ExternalSystemError
+from app.models.job import utcnow
+from app.schemas.data_access_policy import LogicalDataAccessPolicy
+from app.services.policy_verification import (
+    PolicyRuntimeVerificationService,
+    build_verification_plan,
+)
+
+
+def policy(*, decision: str = "ALLOW", subject: str = "alice", with_mask: bool = False, with_filter: bool = False):
+    return LogicalDataAccessPolicy.model_validate(
+        {
+            "subjects": [{"type": "USER", "name": subject}],
+            "resource": {
+                "catalog": "dev",
+                "schema": "sales",
+                "table": "customer",
+            },
+            "access": {"select": decision},
+            "masks": {"phone": "MASK"} if with_mask else {},
+            "row_filter": "region = 'VN'" if with_filter else None,
+        }
+    )
+
+
+def settings(*, user: str = "alice", window: float = 50.0) -> Settings:
+    return Settings(
+        app_env="test",
+        trino_readonly_enabled=True,
+        trino_readonly_user=user,
+        eventual_consistency_window_seconds=window,
+    )
+
+
+class FakeTrino:
+    def __init__(self, *, result=None, error: Exception | None = None) -> None:
+        self.result = result or {"query_id": "q-1", "rows": [[1]]}
+        self.error = error
+        self.sql = None
+
+    def query(self, *, sql: str):
+        self.sql = sql
+        if self.error:
+            raise self.error
+        return self.result
+
+
+def denied_error() -> ExternalSystemError:
+    return ExternalSystemError(
+        "Trino read-only diagnostic query failed",
+        system="trino",
+        retryable=False,
+        details={
+            "error_name": "PERMISSION_DENIED",
+            "error_type": "USER_ERROR",
+            "exception_type": "TrinoUserError",
+        },
+    )
+
+
+def test_allow_select_plan_is_deterministic_for_matching_user() -> None:
+    plan = build_verification_plan(
+        logical_policy=policy(decision="ALLOW"),
+        projection_type="ACCESS",
+        verification_user="alice",
+    )
+
+    assert plan.supported is True
+    assert plan.expected == "QUERY_SUCCESS"
+    assert plan.sql == 'SELECT 1 AS verification_probe FROM "dev"."sales"."customer" LIMIT 1'
+
+
+def test_deny_select_plan_expects_access_denied() -> None:
+    plan = build_verification_plan(
+        logical_policy=policy(decision="DENY"),
+        projection_type="ACCESS",
+        verification_user="alice",
+    )
+    assert plan.supported is True
+    assert plan.expected == "ACCESS_DENIED"
+
+
+def test_non_matching_persona_is_unavailable_not_drift() -> None:
+    plan = build_verification_plan(
+        logical_policy=policy(subject="bob"),
+        projection_type="ACCESS",
+        verification_user="alice",
+    )
+    assert plan.supported is False
+    assert "not a direct USER subject" in str(plan.reason)
+
+
+def test_mask_and_row_filter_require_baseline_contract() -> None:
+    mask = build_verification_plan(
+        logical_policy=policy(with_mask=True),
+        projection_type="MASK",
+        verification_user="alice",
+    )
+    row_filter = build_verification_plan(
+        logical_policy=policy(with_filter=True),
+        projection_type="ROW_FILTER",
+        verification_user="alice",
+    )
+
+    assert mask.supported is False
+    assert "baseline" in str(mask.reason)
+    assert row_filter.supported is False
+    assert "baseline" in str(row_filter.reason)
+
+
+def test_allow_success_is_confirmed() -> None:
+    trino = FakeTrino()
+    result = PolicyRuntimeVerificationService(
+        settings(), trino_service=trino
+    ).verify(
+        logical_policy=policy(decision="ALLOW"),
+        projection_type="ACCESS",
+        ranger_apply_timestamp=utcnow() - timedelta(seconds=5),
+    )
+
+    assert result["status"] == "VERIFICATION_CONFIRMED"
+    assert result["observed"] == "QUERY_SUCCESS"
+    assert result["matches_expected"] is True
+    assert result["query_id"] == "q-1"
+
+
+def test_deny_access_denied_is_confirmed() -> None:
+    trino = FakeTrino(error=denied_error())
+    result = PolicyRuntimeVerificationService(
+        settings(), trino_service=trino
+    ).verify(
+        logical_policy=policy(decision="DENY"),
+        projection_type="ACCESS",
+        ranger_apply_timestamp=utcnow() - timedelta(seconds=5),
+    )
+
+    assert result["status"] == "VERIFICATION_CONFIRMED"
+    assert result["observed"] == "ACCESS_DENIED"
+
+
+def test_deny_query_success_is_pending_within_propagation_window() -> None:
+    result = PolicyRuntimeVerificationService(
+        settings(window=50),
+        trino_service=FakeTrino(),
+    ).verify(
+        logical_policy=policy(decision="DENY"),
+        projection_type="ACCESS",
+        ranger_apply_timestamp=utcnow() - timedelta(seconds=10),
+    )
+
+    assert result["status"] == "VERIFICATION_PENDING"
+    assert result["observed"] == "QUERY_SUCCESS"
+
+
+def test_deny_query_success_becomes_drift_only_after_window() -> None:
+    result = PolicyRuntimeVerificationService(
+        settings(window=10),
+        trino_service=FakeTrino(),
+    ).verify(
+        logical_policy=policy(decision="DENY"),
+        projection_type="ACCESS",
+        ranger_apply_timestamp=utcnow() - timedelta(seconds=30),
+    )
+
+    assert result["status"] == "RUNTIME_DRIFT"
+    assert result["matches_expected"] is False
+
+
+def test_infrastructure_error_is_verification_error_not_drift() -> None:
+    error = ExternalSystemError(
+        "Trino connection failed",
+        system="trino",
+        retryable=True,
+        details={"error_name": "CONNECTION_ERROR"},
+    )
+    result = PolicyRuntimeVerificationService(
+        settings(window=1),
+        trino_service=FakeTrino(error=error),
+    ).verify(
+        logical_policy=policy(decision="ALLOW"),
+        projection_type="ACCESS",
+        ranger_apply_timestamp=utcnow() - timedelta(seconds=100),
+    )
+
+    assert result["status"] == "VERIFICATION_ERROR"
+    assert result["retryable"] is True
