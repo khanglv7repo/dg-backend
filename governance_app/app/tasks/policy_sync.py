@@ -61,28 +61,6 @@ def sync_policy_to_ranger(
             ranger.close()
 
 
-@app.task(
-    name="app.tasks.policy_sync.sync_legacy_ranger_policy_catalog",
-    bind=True,
-    max_retries=5,
-)
-def sync_legacy_ranger_policy_catalog(self, *, payload: dict) -> dict:
-    """Celery replacement for the legacy JobType.SYNC_RANGER_POLICIES
-    JobRepository dispatch (docs/13_IMPLEMENTATION_SPEC.md section 9).
-    Drives the older GovernancePolicy catalog sync path (deprecated
-    /api/v1/policies route), distinct from sync_policy_to_ranger above
-    (which is the R4 DataAccessPolicyVersion authoritative path).
-    """
-    from app.jobs.handlers import handle_sync_ranger_policies
-
-    settings = get_settings()
-    session = SessionLocal()
-    try:
-        return handle_sync_ranger_policies(session, settings, payload)
-    finally:
-        session.close()
-
-
 @app.task(name="app.tasks.policy_sync.verify_trino_policy_enforcement")
 def verify_trino_policy_enforcement() -> dict:
     """Report Trino verification as unavailable until a real read-back plan exists.
