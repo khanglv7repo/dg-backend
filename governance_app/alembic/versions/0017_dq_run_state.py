@@ -39,6 +39,10 @@ def upgrade() -> None:
     )
     op.add_column(
         "testcase_registry",
+        sa.Column("last_run_queued_at", sa.DateTime(timezone=True), nullable=True),
+    )
+    op.add_column(
+        "testcase_registry",
         sa.Column("last_run_started_at", sa.DateTime(timezone=True), nullable=True),
     )
     op.add_column(
@@ -72,6 +76,7 @@ def downgrade() -> None:
     op.drop_column("testcase_registry", "last_run_requested_by")
     op.drop_column("testcase_registry", "last_run_finished_at")
     op.drop_column("testcase_registry", "last_run_started_at")
+    op.drop_column("testcase_registry", "last_run_queued_at")
     op.drop_column("testcase_registry", "last_run_status")
     op.drop_column("testcase_registry", "active_run_id")
     op.drop_column("testcase_registry", "run_generation")
