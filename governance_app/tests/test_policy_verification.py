@@ -318,3 +318,16 @@ def test_row_filter_violation_becomes_drift_after_window() -> None:
 
     assert result["status"] == "RUNTIME_DRIFT"
     assert result["matches_expected"] is False
+
+
+def test_control_identity_must_differ_from_policy_identity() -> None:
+    import pytest
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="control user must differ"):
+        Settings(
+            app_env="test",
+            trino_readonly_enabled=True,
+            trino_readonly_user="alice",
+            trino_verification_control_user="alice",
+        )
