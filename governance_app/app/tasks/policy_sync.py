@@ -8,6 +8,7 @@ from app.core.config import get_settings
 from app.core.errors import ExternalSystemError
 from app.db.session import SessionLocal
 from app.services.policy_reconciliation import PolicyReconciliationService
+from app.services.policy_verification import PolicyRuntimeVerificationService
 from app.services.ranger_client_factory import build_resource_ranger_client
 
 logger = logging.getLogger(__name__)
@@ -63,72 +64,35 @@ def sync_policy_to_ranger(
 
 @app.task(name="app.tasks.policy_sync.verify_trino_policy_enforcement")
 def verify_trino_policy_enforcement() -> dict:
-    """Verify synchronized Ranger projections through real Trino observations.
+    """Verify synchronized ACTIVE policy projections against Trino runtime.
 
-    Ranger convergence and runtime verification remain separate state machines.
-    Only evidence-based contradictions can become RUNTIME_DRIFT.
+    Only deterministic checks are executed. Unsupported projection/persona
+    combinations are persisted as VERIFICATION_UNAVAILABLE, infrastructure
+    failures as VERIFICATION_ERROR, and only a completed mismatching runtime
+    observation beyond the propagation window becomes RUNTIME_DRIFT.
     """
+    from collections import Counter
+
     from sqlalchemy import select
 
     from app.models.data_access_policy import (
         DataAccessPolicyVersion,
         RangerPolicyProjection,
     )
-    from app.repositories.audit import AuditRepository
+    from app.models.job import utcnow
     from app.schemas.data_access_policy import LogicalDataAccessPolicy
-    from app.services.trino_readonly import TrinoReadonlyService
-    from app.services.trino_verification import (
-        RUNTIME_DRIFT,
-        VERIFICATION_CONFIRMED,
-        VERIFICATION_ERROR,
-        VERIFICATION_INCONCLUSIVE,
-        VERIFICATION_PENDING,
-        VERIFICATION_UNAVAILABLE,
-        TrinoRuntimeVerificationService,
-    )
 
     settings = get_settings()
-    counters = {
-        "confirmed": 0,
-        "pending": 0,
-        "drift": 0,
-        "inconclusive": 0,
-        "unavailable": 0,
-        "error": 0,
-    }
-
-    if not settings.trino_readonly_enabled or not settings.trino_readonly_user:
-        with SessionLocal() as db:
-            rows = list(
-                db.scalars(
-                    select(RangerPolicyProjection)
-                    .join(
-                        DataAccessPolicyVersion,
-                        DataAccessPolicyVersion.id
-                        == RangerPolicyProjection.policy_version_id,
-                    )
-                    .where(DataAccessPolicyVersion.status == "ACTIVE")
-                    .where(RangerPolicyProjection.sync_status == "SYNCHRONIZED")
-                )
-            )
-            for row in rows:
-                row.verification_status = VERIFICATION_UNAVAILABLE
-                row.verification_details = {
-                    "reason": "Trino read-only verification identity is not configured"
-                }
-                row.last_verified_at = None
-            db.commit()
-            counters["unavailable"] = len(rows)
+    if not settings.trino_readonly_enabled:
         return {
-            "status": (
-                "NO_PROJECTIONS" if counters["unavailable"] == 0
-                else VERIFICATION_UNAVAILABLE
-            ),
-            **counters,
+            "status": "VERIFICATION_UNAVAILABLE",
+            "confirmed": 0,
+            "pending": 0,
+            "drift": 0,
+            "unavailable": 0,
+            "errors": 0,
+            "reason": "read-only Trino verification is disabled",
         }
-
-    trino = TrinoReadonlyService(settings)
-    verifier = TrinoRuntimeVerificationService(settings, trino=trino)
 
     with SessionLocal() as db:
         rows = list(
@@ -141,70 +105,58 @@ def verify_trino_policy_enforcement() -> dict:
                 )
                 .where(DataAccessPolicyVersion.status == "ACTIVE")
                 .where(RangerPolicyProjection.sync_status == "SYNCHRONIZED")
+                .where(RangerPolicyProjection.last_reconciled_at.isnot(None))
             ).all()
         )
+        if not rows:
+            return {
+                "status": "NO_PROJECTIONS",
+                "confirmed": 0,
+                "pending": 0,
+                "drift": 0,
+                "unavailable": 0,
+                "errors": 0,
+            }
 
-        audit = AuditRepository(db)
+        verifier = PolicyRuntimeVerificationService(settings)
+        counts: Counter[str] = Counter()
+
         for projection, version in rows:
             logical = LogicalDataAccessPolicy.model_validate(version.logical_policy)
-            observation = verifier.verify(
-                projection_type=projection.projection_type,
-                projection_key=projection.projection_key,
+            result = verifier.verify(
                 logical_policy=logical,
+                projection_type=projection.projection_type,
                 ranger_apply_timestamp=projection.last_reconciled_at,
             )
-            projection.verification_status = observation.status
-            projection.verification_details = {
-                **observation.details,
-                "verification_user": settings.trino_readonly_user,
-                "policy_key": version.policy_key,
-                "policy_version": version.version,
-            }
-            from app.models.job import utcnow
-
+            projection.verification_status = str(result["status"])
+            projection.verification_details = result
             projection.last_verified_at = utcnow()
-
-            if observation.status == VERIFICATION_CONFIRMED:
-                counters["confirmed"] += 1
-            elif observation.status == VERIFICATION_PENDING:
-                counters["pending"] += 1
-            elif observation.status == RUNTIME_DRIFT:
-                counters["drift"] += 1
-                audit.record(
-                    actor_id="system:trino-verifier",
-                    actor_name="Trino Runtime Verification",
-                    action="RUNTIME_DRIFT_DETECTED",
-                    object_type="ranger-policy-projection",
-                    object_id=str(projection.id),
-                    correlation_id=None,
-                    details={
-                        "policy_key": version.policy_key,
-                        "version": version.version,
-                        "projection_type": projection.projection_type,
-                        "ranger_policy_name": projection.ranger_policy_name,
-                        **observation.details,
-                    },
-                )
-            elif observation.status == VERIFICATION_INCONCLUSIVE:
-                counters["inconclusive"] += 1
-            elif observation.status == VERIFICATION_ERROR:
-                counters["error"] += 1
-            else:
-                counters["unavailable"] += 1
+            counts[projection.verification_status] += 1
 
         db.commit()
 
-    if not rows:
-        status = "NO_PROJECTIONS"
-    elif counters["drift"]:
-        status = RUNTIME_DRIFT
-    elif counters["error"]:
-        status = VERIFICATION_ERROR
-    elif counters["pending"]:
-        status = VERIFICATION_PENDING
-    elif counters["confirmed"] == len(rows):
-        status = VERIFICATION_CONFIRMED
-    else:
-        status = "PARTIAL_VERIFICATION"
+    drift = counts["RUNTIME_DRIFT"]
+    errors = counts["VERIFICATION_ERROR"]
+    pending = counts["VERIFICATION_PENDING"]
+    unavailable = counts["VERIFICATION_UNAVAILABLE"]
+    confirmed = counts["VERIFICATION_CONFIRMED"]
 
-    return {"status": status, **counters}
+    overall = (
+        "RUNTIME_DRIFT"
+        if drift
+        else "VERIFICATION_ERROR"
+        if errors
+        else "VERIFICATION_PENDING"
+        if pending
+        else "PARTIALLY_VERIFIED"
+        if unavailable
+        else "VERIFICATION_CONFIRMED"
+    )
+    return {
+        "status": overall,
+        "confirmed": confirmed,
+        "pending": pending,
+        "drift": drift,
+        "unavailable": unavailable,
+        "errors": errors,
+    }
