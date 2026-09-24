@@ -14,6 +14,7 @@ from app.celery_app import app
 from app.core.config import get_settings
 from app.db.session import SessionLocal
 from app.repositories.event_outbox import EventOutboxRepository
+from app.tasks.policy_sync import sync_policy_to_ranger
 
 logger = logging.getLogger(__name__)
 
@@ -50,17 +51,38 @@ def dispatch_pending_outbox_events() -> dict:
 
 
 def _publish(record) -> None:
-    """Publish a single outbox event. Placeholder transport: log-only until a
-    concrete downstream consumer (e.g. an outbound webhook or message bus) is
-    selected -- no such external contract is frozen in
-    docs/13_IMPLEMENTATION_SPEC.md beyond "the event was durably enqueued and
-    is dispatched exactly like an Inbox event is processed", so this task's
-    job is to guarantee delivery attempts happen, not to invent a new
-    external wire format.
+    """Publish one durable outbox event to its real downstream consumer.
+
+    The outbox is an at-least-once transport. A record is marked DISPATCHED
+    only after Celery has accepted the reconciliation task. Any publish error,
+    malformed payload, or unknown event type is raised so the caller leaves
+    the record retryable instead of silently losing the event.
     """
+    if record.event_type not in {
+        "policy.version.activated",
+        "policy.version.rolled_back",
+    }:
+        raise ValueError(
+            f"unsupported outbox event_type: {record.event_type!r}"
+        )
+
+    payload = record.payload or {}
+    policy_version_id = payload.get("policy_version_id")
+    if not policy_version_id:
+        raise ValueError(
+            f"outbox event {record.id} missing policy_version_id"
+        )
+
+    task = sync_policy_to_ranger.delay(
+        policy_version_id=str(policy_version_id),
+        correlation_id=payload.get("correlation_id"),
+    )
     logger.info(
-        "outbox event dispatched: aggregate_type=%s aggregate_id=%s event_type=%s",
+        "outbox event published: id=%s aggregate_type=%s aggregate_id=%s "
+        "event_type=%s task_id=%s",
+        record.id,
         record.aggregate_type,
         record.aggregate_id,
         record.event_type,
+        getattr(task, "id", None),
     )
