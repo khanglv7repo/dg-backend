@@ -27,3 +27,4 @@ class DQTestCaseResponse(ORMModel):
     natural_key_hash: str
     om_testcase_id: str | None
     status: Literal["STAGED", "APPROVED", "EXECUTABLE", "FAILED"]
+    materialization_task_id: str | None = None
