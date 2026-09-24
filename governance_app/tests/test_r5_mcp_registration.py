@@ -7,7 +7,7 @@ from fastmcp import Client
 
 from app.mcp.backend_mcp_server import mcp
 
-R5_FROZEN_TOOLS = [
+BOUNDED_AGENT_TOOLS = [
     "get_policy",
     "list_policy_versions",
     "preview_policy_change",
@@ -19,26 +19,21 @@ R5_FROZEN_TOOLS = [
     "inspect_ranger_state",
     "query_trino_readonly",
     "create_policy_version",
-    "activate_policy_version",
-    "rollback_policy",
-    "update_service_mapping",
-    "request_ranger_sync",
-]
-
-R6B_TOOLS = [
-    *R5_FROZEN_TOOLS,
-    "complete_classification_execution",
     "get_tag_sync_observability",
 ]
 
 
-def test_actual_fastmcp_protocol_preserves_existing_tools_and_adds_tag_sync_observability() -> None:
+def test_actual_fastmcp_protocol_exposes_only_bounded_agent_capabilities() -> None:
     async def run() -> None:
         async with Client(mcp) as client:
             tools = await client.list_tools()
             names = [tool.name for tool in tools]
-            assert names == R6B_TOOLS
-            assert names[: len(R5_FROZEN_TOOLS)] == R5_FROZEN_TOOLS
+            assert names == BOUNDED_AGENT_TOOLS
+            assert "activate_policy_version" not in names
+            assert "rollback_policy" not in names
+            assert "update_service_mapping" not in names
+            assert "request_ranger_sync" not in names
+            assert "complete_classification_execution" not in names
             assert client.initialize_result is not None
             assert client.initialize_result.serverInfo.name
             for tool in tools:
