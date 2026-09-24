@@ -26,7 +26,9 @@ class DQTestCaseCreateRequest(BaseModel):
 class DQTestCaseResponse(ORMModel):
     id: str
     natural_key_hash: str
+    target_entity_fqn: str | None = None
     om_testcase_id: str | None
+    om_testcase_fqn: str | None = None
     om_test_suite_fqn: str | None = None
     status: Literal["STAGED", "APPROVED", "EXECUTABLE", "FAILED"]
     materialization_task_id: str | None = None
