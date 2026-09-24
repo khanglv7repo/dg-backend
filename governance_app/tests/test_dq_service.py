@@ -162,7 +162,7 @@ def test_materialization_creates_then_requires_basic_suite_readback(session) -> 
         "id": "om-1",
         "name": "dg_abc",
         "fullyQualifiedName": "financial.crm.customers.email.dg_abc",
-        "testSuite": {"id": "suite-1", "type": "testSuite"},
+        "testSuite": {"id": "suite-1", "type": "testSuite", "fullyQualifiedName": "financial.crm.customers.testSuite"},
     }
     service.om_client = om
 
@@ -170,6 +170,7 @@ def test_materialization_creates_then_requires_basic_suite_readback(session) -> 
 
     assert result["status"] == "EXECUTABLE"
     assert result["om_testcase_id"] == "om-1"
+    assert result["om_test_suite_fqn"] == "financial.crm.customers.testSuite"
     om.create_test_case.assert_called_once()
     record = service.registry.get(approval["id"])
     assert record.reservation_state == "CONFIRMED"
@@ -183,7 +184,7 @@ def test_materialization_reuses_existing_om_testcase_after_crash(session) -> Non
         "id": "om-existing",
         "name": service.registry.get(approval["id"]).natural_key_hash,
         "fullyQualifiedName": "financial.crm.customers.email.dg_existing",
-        "testSuite": {"id": "suite-1", "type": "testSuite"},
+        "testSuite": {"id": "suite-1", "type": "testSuite", "fullyQualifiedName": "financial.crm.customers.testSuite"},
     }
     service.om_client = om
 
@@ -209,3 +210,108 @@ def test_materialization_without_basic_suite_never_marks_executable(session) -> 
         service.materialize_approved_test_case(registry_id=approval["id"])
 
     assert service.registry.get(approval["id"]).lifecycle_state == "APPROVED"
+
+
+def test_prepare_run_requires_executable_state(session) -> None:
+    service, stage = staged(session)
+    with pytest.raises(ConflictError, match="cannot run"):
+        service.prepare_run(
+            registry_id=stage["id"],
+            actor_id="operator-1",
+        )
+
+
+def test_prepare_run_creates_single_active_generation(session) -> None:
+    service, approval = approved(session)
+    om = MagicMock()
+    om.find_test_case_by_entity_and_name.return_value = {
+        "id": "om-run",
+        "name": "dg_run",
+        "fullyQualifiedName": "financial.crm.customers.email.dg_run",
+        "testSuite": {
+            "id": "suite-1",
+            "fullyQualifiedName": "financial.crm.customers.testSuite",
+        },
+    }
+    service.om_client = om
+    executable = service.materialize_approved_test_case(
+        registry_id=approval["id"]
+    )
+
+    run = service.prepare_run(
+        registry_id=executable["id"],
+        actor_id="operator-1",
+    )
+
+    assert run["run_status"] == "QUEUED"
+    assert run["run_generation"] == 1
+    assert run["run_id"]
+    with pytest.raises(ConflictError, match="already has active run"):
+        service.prepare_run(
+            registry_id=executable["id"],
+            actor_id="operator-1",
+        )
+
+
+def test_latest_result_for_active_run_rejects_old_result_and_accepts_new(session) -> None:
+    service, approval = approved(session)
+    om = MagicMock()
+    om.find_test_case_by_entity_and_name.return_value = {
+        "id": "om-result",
+        "name": "dg_result",
+        "fullyQualifiedName": "financial.crm.customers.email.dg_result",
+        "testSuite": {
+            "id": "suite-1",
+            "fullyQualifiedName": "financial.crm.customers.testSuite",
+        },
+    }
+    service.om_client = om
+    executable = service.materialize_approved_test_case(
+        registry_id=approval["id"]
+    )
+    run = service.prepare_run(
+        registry_id=executable["id"],
+        actor_id="operator-1",
+    )
+    service.mark_run_started(
+        registry_id=executable["id"],
+        run_id=run["run_id"],
+    )
+    started = service.registry.get(executable["id"]).last_run_started_at
+    assert started is not None
+
+    old_ms = int((started.timestamp() - 10) * 1000)
+    om.get_test_case_by_name.return_value = {
+        "testCaseResult": {
+            "timestamp": old_ms,
+            "testCaseStatus": "Success",
+            "testResultValue": [],
+        }
+    }
+    assert service.latest_result_for_active_run(
+        registry_id=executable["id"],
+        run_id=run["run_id"],
+    ) is None
+
+    new_ms = int((started.timestamp() + 1) * 1000)
+    om.get_test_case_by_name.return_value = {
+        "testCaseResult": {
+            "timestamp": new_ms,
+            "testCaseStatus": "Failed",
+            "testResultValue": [],
+        }
+    }
+    result = service.latest_result_for_active_run(
+        registry_id=executable["id"],
+        run_id=run["run_id"],
+    )
+    assert result is not None
+    assert result["testCaseStatus"] == "Failed"
+
+    completed = service.complete_run(
+        registry_id=executable["id"],
+        run_id=run["run_id"],
+        result=result,
+    )
+    assert completed["run_status"] == "COMPLETED"
+    assert completed["last_result"]["testCaseStatus"] == "Failed"
