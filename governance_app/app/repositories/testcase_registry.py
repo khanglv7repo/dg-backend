@@ -40,14 +40,10 @@ class TestCaseRegistryRepository:
         worker_id: str,
         spec_payload: dict,
     ) -> tuple[TestCaseRegistry, bool]:
-        """Attempt to reserve a natural_key_hash for this worker.
+        """Create or retrieve the deterministic Backend DQ staging row.
 
-        Returns (registry_row, reserved_by_this_call). If another worker
-        already reserved/confirmed this natural_key_hash, returns the
-        existing row with reserved_by_this_call=False -- caller decides
-        whether that's a 409 (still RESERVED, another worker's in-flight
-        attempt) or a safe idempotent no-op (already CONFIRMED, i.e. the
-        TestCase genuinely already exists in OM).
+        The initial materialization state is NOT_STARTED. OM reservation begins
+        only after explicit approval.
         """
         existing = self.get_by_natural_key_hash(natural_key_hash)
         if existing is not None:
@@ -105,9 +101,9 @@ class TestCaseRegistryRepository:
     def approve(self, record_id, *, actor_id: str) -> TestCaseRegistry:
         """Explicit human/operator STAGED -> APPROVED transition.
 
-        Approval never makes the TestCase executable and never invokes
-        OpenMetadata. That separate transition requires a verified executable
-        TestSuite API contract.
+        Approval never invokes OpenMetadata directly. Backend Celery performs
+        the later materialization; OM 2.0.2 automatically links the TestCase
+        to the entity's Basic TestSuite before Backend marks it EXECUTABLE.
         """
         record = self.session.get(TestCaseRegistry, record_id)
         if record is None:
