@@ -352,7 +352,9 @@ class DQService:
         return {
             "id": str(record.id),
             "natural_key_hash": record.natural_key_hash,
+            "target_entity_fqn": record.target_entity_fqn,
             "om_testcase_id": record.om_testcase_id,
+            "om_testcase_fqn": record.om_testcase_fqn,
             "om_test_suite_fqn": record.om_test_suite_fqn,
             "status": record.lifecycle_state,
             "run_generation": int(record.run_generation or 0),
