@@ -56,8 +56,9 @@ class Settings(BaseSettings):
     openmetadata_execution_bot_token: SecretStr | None = Field(
         default=None,
         validation_alias=AliasChoices(
-            "OM_AUTOCLASSIFICATION_BOT_TOKEN",
+            "OM_EXECUTION_BOT_TOKEN",
             "OPENMETADATA_EXECUTION_BOT_TOKEN",
+            "OM_AUTOCLASSIFICATION_BOT_TOKEN",
         ),
     )
     openmetadata_auto_tag_bot_token: SecretStr | None = Field(
