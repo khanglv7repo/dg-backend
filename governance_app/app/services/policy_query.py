@@ -72,6 +72,9 @@ class PolicyQueryService:
                     "last_error": item.last_error,
                     "reconciliation_details": item.reconciliation_details,
                     "last_reconciled_at": item.last_reconciled_at,
+                    "verification_status": item.verification_status,
+                    "verification_details": item.verification_details,
+                    "last_verified_at": item.last_verified_at,
                 }
                 for item in projections
             ],
