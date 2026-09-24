@@ -33,8 +33,7 @@ def upgrade() -> None:
         "testcase_registry",
         sa.Column("om_testcase_fqn", sa.String(length=3072), nullable=True),
     )
-    op.alter_column("testcase_registry", "spec_payload", server_default=None)
-
+    # Keep the server default for SQLite/PostgreSQL portability and safe\n    # out-of-ORM inserts; application defaults remain identical.\n
     # Existing rows were created under the old direct-create flow. If OM
     # confirmation already exists, preserve that fact as EXECUTABLE.
     op.execute(
