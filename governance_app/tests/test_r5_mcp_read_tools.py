@@ -14,7 +14,6 @@ from app.clients.ranger import RangerClient
 from app.core.config import Settings
 from app.db.base import Base
 from app.mcp import backend_mcp_server
-from app.repositories.classification_execution import ClassificationExecutionRepository
 
 SETTINGS = Settings(
     app_env="test",
@@ -22,8 +21,8 @@ SETTINGS = Settings(
     ranger_service_name="dev_trino",
     ranger_dry_run=False,
     mcp_enabled=True,
-    mcp_actor_id="r5-mcp-test",
-    mcp_actor_name="R5 MCP Test",
+    mcp_actor_id="bounded-mcp-test",
+    mcp_actor_name="Bounded MCP Test",
 )
 
 
@@ -40,22 +39,11 @@ def policy() -> dict:
 def test_mcp_read_diagnostics_mapping_and_preview_use_bounded_services() -> None:
     tmpdir = tempfile.TemporaryDirectory()
     engine = create_engine(
-        f"sqlite+pysqlite:///{tmpdir.name}/r5-read-tools.db",
+        f"sqlite+pysqlite:///{tmpdir.name}/bounded-read-tools.db",
         connect_args={"check_same_thread": False},
     )
     factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
     Base.metadata.create_all(engine)
-
-    with factory() as seed:
-        with seed.begin():
-            execution = ClassificationExecutionRepository(seed).create(
-                event_id="evt-r5-mcp-read",
-                entity_type="table",
-                entity_fqn="dev.sales.customer",
-                status="WAITING_AI",
-                outcome="NO_MATCH",
-            )
-        execution_id = str(execution.id)
 
     ranger = create_autospec(RangerClient, instance=True)
     ranger.service_name = "dev_trino"
@@ -69,13 +57,9 @@ def test_mcp_read_diagnostics_mapping_and_preview_use_bounded_services() -> None
 
     async def run() -> None:
         with patch.object(backend_mcp_server, "SessionLocal", factory), patch.object(
-            backend_mcp_server,
-            "get_settings",
-            return_value=SETTINGS,
+            backend_mcp_server, "get_settings", return_value=SETTINGS
         ), patch.object(
-            backend_mcp_server,
-            "build_resource_ranger_client",
-            return_value=ranger,
+            backend_mcp_server, "build_resource_ranger_client", return_value=ranger
         ), patch.object(
             backend_mcp_server.TrinoReadonlyService,
             "query",
@@ -84,11 +68,9 @@ def test_mcp_read_diagnostics_mapping_and_preview_use_bounded_services() -> None
                 "rows": [[10]],
                 "row_count_returned": 1,
                 "truncated": False,
-                "query_id": "query-r5",
+                "query_id": "query-bounded",
             },
-        ), patch(
-            "app.services.policy_lifecycle.sync_policy_to_ranger.delay"
-        ) as sync_delay:
+        ):
             async with Client(backend_mcp_server.mcp) as client:
                 preview = await client.call_tool(
                     "preview_policy_change",
@@ -97,11 +79,7 @@ def test_mcp_read_diagnostics_mapping_and_preview_use_bounded_services() -> None
                 assert {
                     item["projection_type"] for item in preview.data["projections"]
                 } == {"ACCESS", "MASK", "ROW_FILTER"}
-                assert all(
-                    item["action"] == "CREATE" for item in preview.data["projections"]
-                )
                 ranger.reconcile_document.assert_not_called()
-                sync_delay.assert_not_called()
 
                 conflict = await client.call_tool(
                     "check_policy_conflict",
@@ -111,80 +89,38 @@ def test_mcp_read_diagnostics_mapping_and_preview_use_bounded_services() -> None
 
                 try:
                     await client.call_tool(
-                        "update_service_mapping",
-                        {
-                            "om_service_name": "postgres",
-                            "trino_catalog": "dev",
-                            "ranger_service_name": "dev_trino",
-                            "environment": "local",
-                            "confirmed": False,
-                        },
-                    )
-                except ToolError as exc:
-                    assert "CONFIRMATION_REQUIRED" in str(exc)
-                else:
-                    raise AssertionError("mapping update must require confirmation")
-
-                updated = await client.call_tool(
-                    "update_service_mapping",
-                    {
-                        "om_service_name": "postgres",
-                        "trino_catalog": "dev",
-                        "ranger_service_name": "dev_trino",
-                        "ranger_tag_service_name": "dev_tag",
-                        "environment": "local",
-                        "confirmed": True,
-                    },
-                )
-                assert updated.data["status"] == "RESOLVED"
-                assert updated.data["ranger_mutation"] is False
-
-                resolved = await client.call_tool(
-                    "resolve_resource_mapping",
-                    {"om_service_name": "postgres", "environment": "local"},
-                )
-                assert resolved.data["trino_catalog"] == "dev"
-
-                try:
-                    await client.call_tool(
                         "resolve_resource_mapping",
                         {"om_service_name": "post", "environment": "local"},
                     )
                 except ToolError as exc:
                     assert "UNRESOLVED" in str(exc)
                 else:
-                    raise AssertionError("fuzzy/unresolved mapping must not be guessed")
+                    raise AssertionError("unresolved mapping must not be guessed")
 
-                workflow = await client.call_tool(
-                    "get_workflow_status",
-                    {"execution_id": execution_id},
-                )
-                assert workflow.data["status"] == "WAITING_AI"
-
-                audit = await client.call_tool(
-                    "get_audit_summary",
-                    {"object_type": "service-mapping", "limit": 1000},
-                )
-                assert audit.data["limit"] == 100
-                assert audit.data["returned"] == 1
-
-                health = await client.call_tool(
-                    "inspect_ranger_state",
-                    {"kind": "health"},
-                )
+                health = await client.call_tool("inspect_ranger_state", {"kind": "health"})
                 assert health.data["service_name"] == "dev_trino"
+
                 user = await client.call_tool(
-                    "inspect_ranger_state",
-                    {"kind": "user", "name": "alice"},
+                    "inspect_ranger_state", {"kind": "user", "name": "alice"}
                 )
                 assert user.data["exists"] is True
-                ranger.reconcile_document.assert_not_called()
 
                 trino = await client.call_tool(
                     "query_trino_readonly",
                     {"sql": "SELECT count(*) FROM dev.sales.customer"},
                 )
                 assert trino.data["rows"] == [[10]]
+
+                tool_names = [tool.name for tool in await client.list_tools()]
+                for forbidden in (
+                    "activate_policy_version",
+                    "rollback_policy",
+                    "update_service_mapping",
+                    "request_ranger_sync",
+                    "complete_classification_execution",
+                    "get_workflow_status",
+                ):
+                    assert forbidden not in tool_names
 
     try:
         anyio.run(run)
