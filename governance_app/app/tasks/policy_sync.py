@@ -85,121 +85,41 @@ def sync_legacy_ranger_policy_catalog(self, *, payload: dict) -> dict:
 
 @app.task(name="app.tasks.policy_sync.verify_trino_policy_enforcement")
 def verify_trino_policy_enforcement() -> dict:
-    """Periodic Trino read-back verification for SYNCHRONIZED policy projections.
+    """Report Trino verification as unavailable until a real read-back plan exists.
 
-    For each policy projection that is SYNCHRONIZED in Ranger, verify that Trino
-    actually enforces the expected access control by running a read-only query.
-    Classifies each projection as:
-      - VERIFICATION_CONFIRMED: Trino enforces as desired.
-      - VERIFICATION_PENDING: not yet enforced, within the D1-measured propagation
-        window (not an incident — Ranger→Trino propagation measured min=20.3s /
-        median=32.2s / max=33.0s; window = max × 1.5 ≈ 50s).
-      - RUNTIME_DRIFT: propagation window elapsed with no enforcement observed —
-        a real anomaly requiring escalation.
+    A placeholder check that always returns False must never be interpreted as
+    RUNTIME_DRIFT. Drift is a semantic claim about observed runtime behaviour;
+    without a projection-specific verification query there is no observation.
 
-    Scheduled at 2 × eventual_consistency_window (≈100s) to avoid racing
-    normal propagation delay on the first poll after a fresh Ranger apply.
-    Wires verify_trino_enforcement() from PolicyReconciliationService, which was
-    added in Work Packet G but had no caller before this task.
+    This hotfix therefore fails closed at the verification capability boundary:
+    synchronized Ranger projections remain synchronized, no drift audit event is
+    emitted, and callers receive an explicit VERIFICATION_UNAVAILABLE count.
     """
-    from datetime import timezone
-
-    from sqlalchemy import select
+    from sqlalchemy import func, select
 
     from app.models.data_access_policy import RangerPolicyProjection
-    from app.repositories.audit import AuditRepository
-
-    settings = get_settings()
-    confirmed = 0
-    pending = 0
-    drift = 0
 
     with SessionLocal() as db:
-        ranger = build_resource_ranger_client(settings)
-        try:
-            # Only verify projections that have been synchronized and have a
-            # known last_reconciled_at timestamp (set by the reconcile task).
-            stmt = (
-                select(RangerPolicyProjection)
+        unavailable = int(
+            db.execute(
+                select(func.count())
+                .select_from(RangerPolicyProjection)
                 .where(RangerPolicyProjection.sync_status == "SYNCHRONIZED")
                 .where(RangerPolicyProjection.last_reconciled_at.isnot(None))
-            )
-            projections = list(db.execute(stmt).scalars())
+            ).scalar_one()
+        )
 
-            if not projections:
-                return {
-                    "status": "NO_PROJECTIONS",
-                    "confirmed": 0,
-                    "pending": 0,
-                    "drift": 0,
-                }
-
-            service = PolicyReconciliationService(
-                db,
-                settings,
-                ranger_client=ranger,
-                trino_service=None,
-            )
-
-            audit = AuditRepository(db)
-            for projection in projections:
-                apply_ts = projection.last_reconciled_at
-                if apply_ts and apply_ts.tzinfo is None:
-                    apply_ts = apply_ts.replace(tzinfo=timezone.utc)
-
-                # check() is a zero-arg callable that reads Trino and returns
-                # True if the expected enforcement is observed. No per-projection
-                # Trino verification query is yet defined (TrinoReadonlyService
-                # exposes only a generic query() method, not a per-projection
-                # read-back helper). Conservative default: always return False,
-                # leaving projections PENDING until a specific verification
-                # query is wired per projection type in a future task.
-                # This means RUNTIME_DRIFT is only triggered once the
-                # eventual_consistency_window elapses without a confirmed read-back,
-                # which is the correct conservative behaviour per the spec.
-                def check() -> bool:  # noqa: E731
-                    return False
-
-                try:
-                    result = service.verify_trino_enforcement(
-                        ranger_apply_timestamp=apply_ts,
-                        check=check,
-                    )
-                    status_val = result["status"]
-                    if status_val == "VERIFICATION_CONFIRMED":
-                        confirmed += 1
-                    elif status_val == "VERIFICATION_PENDING":
-                        pending += 1
-                    else:
-                        drift += 1
-                        logger.warning(
-                            "RUNTIME_DRIFT detected for projection %s (policy_key=%s "
-                            "elapsed=%.1fs window=%.1fs)",
-                            projection.ranger_policy_name,
-                            projection.policy_key,
-                            result.get("elapsed_seconds", -1),
-                            result.get("eventual_consistency_window_seconds", -1),
-                        )
-                        audit.record(
-                            actor_id="system:trino-verification",
-                            actor_name="Trino Enforcement Verifier",
-                            action="TRINO_ENFORCEMENT_DRIFT",
-                            object_type="ranger_policy_projection",
-                            object_id=str(projection.id),
-                            details={
-                                "ranger_policy_name": projection.ranger_policy_name,
-                                "policy_key": projection.policy_key,
-                                **result,
-                            },
-                        )
-                except Exception:
-                    logger.exception(
-                        "verify_trino_enforcement failed for projection %s",
-                        getattr(projection, "ranger_policy_name", "?"),
-                    )
-
-            db.commit()
-        finally:
-            ranger.close()
-
-    return {"confirmed": confirmed, "pending": pending, "drift": drift}
+    status = "NO_PROJECTIONS" if unavailable == 0 else "VERIFICATION_UNAVAILABLE"
+    if unavailable:
+        logger.warning(
+            "Trino runtime verification unavailable for %s synchronized projection(s): "
+            "no projection-specific verification query is implemented",
+            unavailable,
+        )
+    return {
+        "status": status,
+        "confirmed": 0,
+        "pending": 0,
+        "drift": 0,
+        "unavailable": unavailable,
+    }
