@@ -39,8 +39,8 @@ def sync_tags_to_ranger(
     om_client = OpenMetadataClient(
         base_url=settings.openmetadata_base_url,
         token=(
-            settings.openmetadata_auto_tag_bot_token.get_secret_value()
-            if settings.openmetadata_auto_tag_bot_token
+            settings.openmetadata_execution_bot_token.get_secret_value()
+            if settings.openmetadata_execution_bot_token
             else None
         ),
         timeout=settings.openmetadata_timeout_seconds,
