@@ -63,3 +63,45 @@ def create_test_case(
         om_client.close()
 
     return DQTestCaseResponse.model_validate(result)
+
+
+@router.post(
+    "/test-cases/{registry_id}/approve",
+    response_model=DQTestCaseResponse,
+    status_code=status.HTTP_200_OK,
+)
+def approve_test_case(
+    registry_id: str,
+    session: DbSession,
+    settings: AppSettings,
+    actor: CurrentActor,
+) -> DQTestCaseResponse:
+    """Explicit human/operator approval of a STAGED DQ TestCase.
+
+    Agent identities are intentionally excluded. Approval records governance
+    intent only; it does not make the TestCase executable or run it.
+    """
+    if not actor.has_any_role("governance-operator", "governance-admin"):
+        raise AuthorizationError(
+            "governance-operator or governance-admin role is required for DQ approval"
+        )
+
+    token = (
+        settings.openmetadata_agent_bot_token.get_secret_value()
+        if settings.openmetadata_agent_bot_token
+        else None
+    )
+    om_client = OpenMetadataClient(
+        base_url=settings.openmetadata_base_url,
+        token=token,
+        timeout=settings.openmetadata_timeout_seconds,
+    )
+    try:
+        result = DQService(session, settings, om_client=om_client).approve_staged_test_case(
+            registry_id=registry_id,
+            actor_id=actor.subject,
+        )
+    finally:
+        om_client.close()
+
+    return DQTestCaseResponse.model_validate(result)
