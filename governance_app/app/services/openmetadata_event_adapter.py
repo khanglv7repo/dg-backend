@@ -19,7 +19,6 @@ from app.repositories.audit import AuditRepository
 from app.repositories.event_inbox import EventInboxRepository
 from app.services.event_router import EventPurpose, EventPurposeRouter
 from app.tasks.tag_sync import sync_tags_to_ranger
-from app.tasks.task_resolution import resolve_task_followup
 
 logger = logging.getLogger(__name__)
 
@@ -51,28 +50,6 @@ class OpenMetadataEventAdapterService:
         )
         timestamp = event_data.get("timestamp") or 0
         correlation_id = f"om-event-{event_id}" if event_id else None
-
-        # Task ChangeEvents (task.entityUpdated) are a distinct domain from
-        # column/tag ChangeEvents -- route them separately, always
-        # re-fetching the authoritative Task status (A5 PARTIAL finding:
-        # this event type never carries the status field itself).
-        if event_type == "task.entityUpdated":
-            task_entity_id = str(
-                event_data.get("entityId") or event_data.get("entity", {}).get("id") or ""
-            )
-            if task_entity_id:
-                task_res = resolve_task_followup.delay(
-                    task_id=task_entity_id,
-                    correlation_id=correlation_id,
-                )
-                return {
-                    "status": "accepted",
-                    "event_id": event_id or task_entity_id,
-                    "purposes": [],
-                    "dispatched_tasks": [str(task_res.id)] if getattr(task_res, "id", None) else [],
-                }
-            logger.info("Ignoring task.entityUpdated event with missing entityId")
-            return {"status": "ignored", "reason": "missing_task_entity_id"}
 
         if not entity_fqn:
             logger.info("Ignoring OpenMetadata event with missing entityFullyQualifiedName")
