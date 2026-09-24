@@ -83,16 +83,6 @@ def verify_trino_policy_enforcement() -> dict:
     from app.schemas.data_access_policy import LogicalDataAccessPolicy
 
     settings = get_settings()
-    if not settings.trino_readonly_enabled:
-        return {
-            "status": "VERIFICATION_UNAVAILABLE",
-            "confirmed": 0,
-            "pending": 0,
-            "drift": 0,
-            "unavailable": 0,
-            "errors": 0,
-            "reason": "read-only Trino verification is disabled",
-        }
 
     with SessionLocal() as db:
         rows = list(
@@ -116,6 +106,27 @@ def verify_trino_policy_enforcement() -> dict:
                 "drift": 0,
                 "unavailable": 0,
                 "errors": 0,
+            }
+
+        if not settings.trino_readonly_enabled:
+            now = utcnow()
+            for projection, _version in rows:
+                projection.verification_status = "VERIFICATION_UNAVAILABLE"
+                projection.verification_details = {
+                    "status": "VERIFICATION_UNAVAILABLE",
+                    "reason": "read-only Trino verification is disabled",
+                    "verified_at": now.isoformat(),
+                }
+                projection.last_verified_at = now
+            db.commit()
+            return {
+                "status": "VERIFICATION_UNAVAILABLE",
+                "confirmed": 0,
+                "pending": 0,
+                "drift": 0,
+                "unavailable": len(rows),
+                "errors": 0,
+                "reason": "read-only Trino verification is disabled",
             }
 
         verifier = PolicyRuntimeVerificationService(settings)
