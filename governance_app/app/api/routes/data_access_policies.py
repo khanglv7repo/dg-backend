@@ -168,7 +168,6 @@ def rollback_policy(
             db,
             settings,
             ranger_client=ranger,
-            dispatcher=_dispatch,
         ).rollback(
             policy_key=policy_key,
             target_version=request.target_version,
