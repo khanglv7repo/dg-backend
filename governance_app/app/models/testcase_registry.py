@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Index, String, UniqueConstraint
+from sqlalchemy import DateTime, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -41,8 +41,17 @@ class TestCaseRegistry(Base):
     worker_id: Mapped[str] = mapped_column(String(128), nullable=False)
     spec_payload: Mapped[dict] = mapped_column(JSON_TYPE, nullable=False, default=dict)
     om_testcase_fqn: Mapped[str | None] = mapped_column(String(3072))
+    om_test_suite_fqn: Mapped[str | None] = mapped_column(String(3072))
     lifecycle_state: Mapped[str] = mapped_column(
         String(32), nullable=False, default="STAGED"
     )
     approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     approved_by: Mapped[str | None] = mapped_column(String(255))
+    run_generation: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    active_run_id: Mapped[uuid.UUID | None] = mapped_column(UUID_TYPE)
+    last_run_status: Mapped[str | None] = mapped_column(String(32))
+    last_run_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_run_finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_run_requested_by: Mapped[str | None] = mapped_column(String(255))
+    last_run_error: Mapped[str | None] = mapped_column(Text)
+    last_result: Mapped[dict] = mapped_column(JSON_TYPE, nullable=False, default=dict)
