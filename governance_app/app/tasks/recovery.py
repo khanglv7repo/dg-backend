@@ -9,6 +9,7 @@ event/dispatch is only a trigger, reconciliation is correctness).
 from __future__ import annotations
 
 import logging
+from datetime import timedelta
 
 from sqlalchemy import select
 
@@ -16,6 +17,7 @@ from app.celery_app import app
 from app.core.config import get_settings
 from app.db.session import SessionLocal
 from app.models.event_inbox import EventInbox
+from app.models.job import utcnow
 from app.repositories.audit import AuditRepository
 from app.repositories.event_inbox import EventInboxRepository
 from app.services.event_router import EventPurpose, EventPurposeRouter
@@ -41,11 +43,16 @@ def retry_unfinished_workflows() -> dict:
         inbox_repo = EventInboxRepository(session)
         audit = AuditRepository(session)
 
+        recovery_cutoff = utcnow() - timedelta(
+            seconds=_RECOVERY_MIN_AGE_SECONDS
+        )
         stmt = (
             select(EventInbox)
             .where(EventInbox.status.in_(("RECEIVED",)))
+            .where(EventInbox.created_at <= recovery_cutoff)
             .order_by(EventInbox.created_at.asc())
             .limit(200)
+            .with_for_update(skip_locked=True)
         )
         candidates = list(session.execute(stmt).scalars())
 
