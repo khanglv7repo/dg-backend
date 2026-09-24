@@ -26,4 +26,4 @@ class DQTestCaseResponse(ORMModel):
     id: str
     natural_key_hash: str
     om_testcase_id: str | None
-    status: Literal["STAGED", "EXECUTABLE", "FAILED"]
+    status: Literal["STAGED", "APPROVED", "EXECUTABLE", "FAILED"]
