@@ -50,6 +50,7 @@ class TestCaseRegistry(Base):
     run_generation: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     active_run_id: Mapped[uuid.UUID | None] = mapped_column(UUID_TYPE)
     last_run_status: Mapped[str | None] = mapped_column(String(32))
+    last_run_queued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_run_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_run_finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_run_requested_by: Mapped[str | None] = mapped_column(String(255))
