@@ -142,6 +142,7 @@ def verify_trino_policy_enforcement() -> dict:
             result = verifier.verify(
                 logical_policy=logical,
                 projection_type=projection.projection_type,
+                projection_key=projection.projection_key,
                 ranger_apply_timestamp=projection.last_reconciled_at,
             )
             current_status = str(result["status"])
