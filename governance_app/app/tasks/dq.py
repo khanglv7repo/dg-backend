@@ -287,20 +287,55 @@ def recover_testcase_registry() -> dict:
                     )
                     if observed is not None and observed.get("testSuite"):
                         test_suite = observed.get("testSuite") or {}
-                        repository.mark_executable(
-                            record.id,
-                            om_testcase_id=str(observed.get("id") or ""),
-                            om_testcase_fqn=str(
-                                observed.get("fullyQualifiedName") or ""
-                            ),
-                            om_test_suite_fqn=str(
-                                test_suite.get("fullyQualifiedName")
-                                or test_suite.get("name")
-                                or ""
-                            ),
+                        test_suite_fqn = str(
+                            test_suite.get("fullyQualifiedName")
+                            or test_suite.get("name")
+                            or ""
                         )
-                        session.commit()
-                        reconciled += 1
+                        suite = (
+                            om_client.get_test_suite_by_name(test_suite_fqn)
+                            if test_suite_fqn
+                            else {}
+                        )
+                        is_executable_suite = (
+                            suite.get("basic") is True
+                            or suite.get("executable") is True
+                        )
+                        suite_entity = (
+                            suite.get("basicEntityReference")
+                            or suite.get("executableEntityReference")
+                            or {}
+                        )
+                        suite_entity_fqn = (
+                            str(
+                                suite_entity.get("fullyQualifiedName")
+                                or suite_entity.get("name")
+                                or ""
+                            ).strip()
+                            if isinstance(suite_entity, dict)
+                            else ""
+                        )
+                        if (
+                            is_executable_suite
+                            and (
+                                not suite_entity_fqn
+                                or suite_entity_fqn == entity_fqn
+                            )
+                        ):
+                            repository.mark_executable(
+                                record.id,
+                                om_testcase_id=str(observed.get("id") or ""),
+                                om_testcase_fqn=str(
+                                    observed.get("fullyQualifiedName") or ""
+                                ),
+                                om_test_suite_fqn=test_suite_fqn,
+                            )
+                            session.commit()
+                            reconciled += 1
+                        else:
+                            repository.mark_failed(record.id)
+                            session.commit()
+                            still_missing += 1
                     elif record.lifecycle_state == "APPROVED":
                         materialize_approved_test_case.delay(
                             registry_id=str(record.id)
