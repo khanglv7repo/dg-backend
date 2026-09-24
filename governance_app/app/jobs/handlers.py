@@ -8,107 +8,11 @@ from app.clients.ranger_tags import RangerTagStoreClient
 from app.core.config import Settings
 from app.core.errors import ConfigurationError
 from app.models.enums import JobType
-from app.schemas.events import MetadataEventRequest
 from app.services.asset_discovery import AssetDiscoveryService
-from app.services.classification import ClassificationService
-from app.services.classification_commands import OpenMetadataClassificationRunner
-from app.services.openmetadata_governance import (
-    ConfirmedTagApplicationService,
-    OpenMetadataSuggestionService,
-)
 from app.services.policy_sync import (
     RangerPolicyCatalogSyncService,
     RangerTagAssignmentService,
 )
-
-
-def _autoclassification_openmetadata_client(
-    settings: Settings,
-) -> OpenMetadataClient:
-    if not settings.openmetadata_enabled:
-        raise ConfigurationError("OpenMetadata integration is disabled")
-    return OpenMetadataClient(
-        base_url=settings.openmetadata_base_url,
-        token=(
-            settings.openmetadata_execution_bot_token.get_secret_value()
-            if settings.openmetadata_execution_bot_token
-            else None
-        ),
-        timeout=settings.openmetadata_timeout_seconds,
-    )
-
-
-def handle_classify(
-    session: Session,
-    settings: Settings,
-    payload: dict,
-) -> dict:
-    return ClassificationService(session, settings).classify(
-        MetadataEventRequest.model_validate(payload)
-    )
-
-
-def handle_classify_from_openmetadata(
-    session: Session,
-    settings: Settings,
-    payload: dict,
-) -> dict:
-    client = _autoclassification_openmetadata_client(settings)
-    try:
-        return OpenMetadataClassificationRunner(
-            session,
-            settings,
-            client,
-        ).run(payload)
-    finally:
-        client.close()
-
-
-def handle_create_om_suggestions(
-    session: Session,
-    settings: Settings,
-    payload: dict,
-) -> dict:
-    client = _auto_tag_openmetadata_client(settings)
-    try:
-        return OpenMetadataSuggestionService(
-            session,
-            client,
-            bot_name=settings.openmetadata_execution_bot_name,
-        ).create(
-            classification_run_id=payload["classification_run_id"],
-            entity_type=payload["entity_type"],
-            entity_fqn=payload["entity_fqn"],
-            source_kind=payload["source_kind"],
-            source_version=payload["source_version"],
-            suggestions=list(payload.get("suggestions", [])),
-            correlation_id=payload.get("correlation_id"),
-        )
-    finally:
-        client.close()
-
-
-def handle_apply_confirmed_tags(
-    session: Session,
-    settings: Settings,
-    payload: dict,
-) -> dict:
-    client = _auto_tag_openmetadata_client(settings)
-    try:
-        return ConfirmedTagApplicationService(
-            session,
-            client,
-            bot_name=settings.openmetadata_execution_bot_name,
-        ).apply(
-            classification_run_id=payload.get("classification_run_id"),
-            entity_type=payload["entity_type"],
-            entity_fqn=payload["entity_fqn"],
-            entity_tags=list(payload.get("entity_tags", [])),
-            field_tags=dict(payload.get("field_tags", {})),
-            correlation_id=payload.get("correlation_id"),
-        )
-    finally:
-        client.close()
 
 
 def handle_sync_ranger_policies(
@@ -290,10 +194,6 @@ def _ranger_tag_store_client(
 
 
 HANDLERS = {
-    JobType.CLASSIFY_ASSET: handle_classify,
-    JobType.CLASSIFY_ASSET_FROM_OM: handle_classify_from_openmetadata,
-    JobType.CREATE_OM_SUGGESTIONS: handle_create_om_suggestions,
-    JobType.APPLY_CONFIRMED_TAGS: handle_apply_confirmed_tags,
     JobType.SYNC_RANGER_POLICIES: handle_sync_ranger_policies,
     JobType.SYNC_RANGER_TAGS: handle_sync_ranger_tags,
     JobType.RECONCILE_RANGER: handle_reconcile_ranger,
