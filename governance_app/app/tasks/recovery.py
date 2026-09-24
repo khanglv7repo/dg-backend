@@ -103,6 +103,10 @@ def retry_unfinished_workflows() -> dict:
                 inbox_repo.record_purpose_dispatched(record.id, purpose, task_id)
                 recovered += 1
 
+            current_dispatched = set(record.dispatched_purposes or [])
+            if purposes_required.issubset(current_dispatched):
+                inbox_repo.mark_processed(record.id)
+
             dispatched_tasks = dict(record.dispatched_tasks or {})
             dispatched_tasks["_retry_count"] = retry_count + 1
             record.dispatched_tasks = dispatched_tasks
