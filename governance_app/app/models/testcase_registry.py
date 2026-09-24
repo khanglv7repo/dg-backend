@@ -33,7 +33,7 @@ class TestCaseRegistry(Base):
     test_definition_fqn: Mapped[str] = mapped_column(String(512), nullable=False)
     stable_test_slot_id: Mapped[str] = mapped_column(String(512), nullable=False)
     om_testcase_id: Mapped[str | None] = mapped_column(String(64))
-    reservation_state: Mapped[str] = mapped_column(String(32), nullable=False, default="RESERVED")
+    reservation_state: Mapped[str] = mapped_column(String(32), nullable=False, default="NOT_STARTED")
     reserved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     worker_id: Mapped[str] = mapped_column(String(128), nullable=False)
