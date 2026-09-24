@@ -49,7 +49,7 @@ def create_test_case(
         rule_id=request.rule_id,
         test_key=request.test_key,
         column_name=request.column_name,
-        worker_id=request.worker_id,
+        worker_id=actor.subject,
         rationale=request.rationale,
     )
     return DQTestCaseResponse.model_validate(result)
