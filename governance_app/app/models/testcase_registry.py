@@ -11,7 +11,17 @@ from app.models.job import JSON_TYPE, UUID_TYPE, utcnow
 
 
 class TestCaseRegistry(Base):
-    """Backend DQ governance + OpenMetadata materialization registry.\n\n    lifecycle_state tracks governance intent:\n        STAGED -> APPROVED -> EXECUTABLE | FAILED\n\n    reservation_state tracks OM materialization:\n        NOT_STARTED -> RESERVED -> CONFIRMED | FAILED\n\n    OpenMetadata remains authoritative for the materialized TestCase itself.\n    natural_key_hash is the deterministic TestCase name/idempotency key.\n    """
+    """Backend DQ governance + OpenMetadata materialization registry.
+
+    lifecycle_state tracks governance intent:
+        STAGED -> APPROVED -> EXECUTABLE | FAILED
+
+    reservation_state tracks OM materialization:
+        NOT_STARTED -> RESERVED -> CONFIRMED | FAILED
+
+    OpenMetadata remains authoritative for the materialized TestCase itself.
+    natural_key_hash is the deterministic TestCase name/idempotency key.
+    """
 
     __tablename__ = "testcase_registry"
     __table_args__ = (
