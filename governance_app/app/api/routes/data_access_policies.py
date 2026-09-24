@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, status
 
 from app.api.dependencies import AppSettings, CurrentActor, DbSession
-from app.core.errors import AuthorizationError, ExternalSystemError
+from app.core.errors import AuthorizationError
 from app.schemas.data_access_policy import (
     ActivationResponse,
     CreatePolicyVersionRequest,
@@ -17,7 +17,6 @@ from app.schemas.data_access_policy import (
 from app.services.data_access_policy import DataAccessPolicyService
 from app.services.policy_lifecycle import PolicyLifecycleService
 from app.services.ranger_client_factory import build_resource_ranger_client
-from app.tasks.policy_sync import sync_policy_to_ranger
 
 router = APIRouter()
 
@@ -33,24 +32,6 @@ def _require_admin(actor) -> None:
     if not actor.has_any_role("governance-admin"):
         raise AuthorizationError("governance-admin role is required")
 
-
-def _dispatch(version_id: str, correlation_id: str | None = None) -> str | None:
-    """REST-compatible dispatcher retained as an injectable lifecycle dependency."""
-
-    try:
-        task = sync_policy_to_ranger.delay(
-            policy_version_id=version_id,
-            correlation_id=correlation_id,
-        )
-    except Exception as exc:  # broker failure happens after durable commit by design
-        raise ExternalSystemError(
-            "policy activation is durable but Celery reconciliation publish failed; "
-            "retry the same activation to republish without creating new authority",
-            system="celery",
-            retryable=True,
-            details={"policy_version_id": version_id},
-        ) from exc
-    return str(task.id) if getattr(task, "id", None) else None
 
 
 @router.post(
@@ -155,7 +136,6 @@ def activate_policy_version(
             db,
             settings,
             ranger_client=ranger,
-            dispatcher=_dispatch,
         ).activate(
             policy_key=policy_key,
             version=version,
