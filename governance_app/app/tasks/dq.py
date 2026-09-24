@@ -118,8 +118,13 @@ def run_executable_test_case(
 ) -> dict:
     """Run one generation-fenced EXECUTABLE TestCase through metadata test.
 
-    On retry, reconcile the latest OM testCaseResult against the original
-    run_started_at before triggering the external workflow again.
+    Execution is intentionally AT-LEAST-ONCE, not exactly-once. A network
+    timeout can be ambiguous: the external workflow may have started even
+    though Backend did not receive the response. Before every retry we first
+    reconcile OpenMetadata result state using the durable run_started_at fence;
+    if no qualifying result is visible, re-execution is allowed because the DQ
+    workflow is read-only against governed data and only appends DQ result
+    metadata.
     """
     settings = get_settings()
     om_client = _execution_om_client(settings)
