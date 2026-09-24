@@ -20,7 +20,13 @@ class DQTestCaseCreateRequest(BaseModel):
     rule_id: str = Field(min_length=1)
     test_key: str | None = None
     column_name: str | None = None
-    worker_id: str = Field(min_length=1)
+    worker_id: str | None = Field(
+        default=None,
+        description=(
+            "Deprecated compatibility field; Backend uses the authenticated actor "
+            "as the staging worker identity."
+        ),
+    )
 
 
 class DQTestCaseResponse(ORMModel):
