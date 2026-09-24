@@ -23,6 +23,8 @@ SETTINGS = Settings(
     mcp_enabled=True,
     mcp_actor_id="bounded-mcp-test",
     mcp_actor_name="Bounded MCP Test",
+    trino_readonly_enabled=True,
+    trino_readonly_user="verification-user",
 )
 
 
