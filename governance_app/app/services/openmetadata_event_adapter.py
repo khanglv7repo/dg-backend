@@ -18,7 +18,6 @@ from app.core.errors import AuthorizationError
 from app.repositories.audit import AuditRepository
 from app.repositories.event_inbox import EventInboxRepository
 from app.services.event_router import EventPurpose, EventPurposeRouter
-from app.tasks.classification import classify_entity
 from app.tasks.tag_override_guard import NATIVE_CLASSIFIER_ACTORS, restore_overridden_tag
 from app.tasks.tag_sync import sync_tags_to_ranger
 from app.tasks.task_resolution import resolve_task_followup
@@ -135,28 +134,6 @@ class OpenMetadataEventAdapterService:
         # ---------------------------------------------------------------------
         dispatched_tasks: list[str] = []
         newly_dispatched_purposes: list[str] = []
-
-        if EventPurpose.CLASSIFY in purposes and EventPurpose.CLASSIFY.value not in dispatched_purposes:
-            try:
-                task_res = classify_entity.delay(
-                    event_id=event_id,
-                    entity_type=entity_type,
-                    entity_fqn=entity_fqn,
-                    correlation_id=correlation_id,
-                )
-                dispatched_tasks.append(str(task_res.id))
-                newly_dispatched_purposes.append(EventPurpose.CLASSIFY.value)
-                self.audit.record(
-                    actor_id="system:openmetadata-webhook",
-                    actor_name="OpenMetadata Webhook Adapter",
-                    action="ASSET_CLASSIFICATION_DISPATCHED",
-                    object_type=entity_type,
-                    object_id=entity_fqn,
-                    correlation_id=correlation_id,
-                    details={"event_id": event_id, "purposes": purpose_strings, "task_id": str(task_res.id)},
-                )
-            except Exception as exc:
-                logger.warning("Could not dispatch classify_entity task: %s", exc)
 
         if EventPurpose.TAG_SYNC in purposes and EventPurpose.TAG_SYNC.value not in dispatched_purposes:
             try:
