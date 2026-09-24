@@ -6,6 +6,7 @@ import logging
 from app.celery_app import app
 from app.clients.openmetadata import OpenMetadataClient
 from app.core.config import get_settings
+from app.core.errors import ExternalSystemError, ValidationError
 from app.db.session import SessionLocal
 from app.repositories.testcase_registry import TestCaseRegistryRepository
 from app.services.dq_service import DQService
@@ -46,14 +47,59 @@ def materialize_approved_test_case(self, *, registry_id: str) -> dict:
                 settings,
                 om_client=om_client,
             ).materialize_approved_test_case(registry_id=registry_id)
-        except Exception as exc:
+        except ValidationError as exc:
             session.rollback()
-            logger.exception(
-                "DQ materialization failed for %s: %s",
+            repository = TestCaseRegistryRepository(session)
+            repository.mark_materialization_failed(registry_id, permanent=True)
+            session.commit()
+            logger.error(
+                "DQ materialization permanently failed validation for %s: %s",
                 registry_id,
                 exc,
             )
-            raise self.retry(exc=exc, countdown=min(300, 2 ** (self.request.retries + 1)))
+            return {
+                "id": registry_id,
+                "status": "FAILED",
+                "error": exc.message,
+                "retryable": False,
+            }
+        except ExternalSystemError as exc:
+            session.rollback()
+            if not exc.retryable:
+                repository = TestCaseRegistryRepository(session)
+                repository.mark_materialization_failed(registry_id, permanent=True)
+                session.commit()
+                logger.error(
+                    "DQ materialization permanently failed for %s: %s",
+                    registry_id,
+                    exc,
+                )
+                return {
+                    "id": registry_id,
+                    "status": "FAILED",
+                    "error": exc.message,
+                    "retryable": False,
+                }
+            logger.exception(
+                "DQ materialization transient failure for %s: %s",
+                registry_id,
+                exc,
+            )
+            raise self.retry(
+                exc=exc,
+                countdown=min(300, 2 ** (self.request.retries + 1)),
+            )
+        except Exception as exc:
+            session.rollback()
+            logger.exception(
+                "DQ materialization unexpected failure for %s: %s",
+                registry_id,
+                exc,
+            )
+            raise self.retry(
+                exc=exc,
+                countdown=min(300, 2 ** (self.request.retries + 1)),
+            )
         finally:
             om_client.close()
 
