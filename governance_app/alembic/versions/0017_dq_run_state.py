@@ -66,9 +66,7 @@ def upgrade() -> None:
             server_default=sa.text("'{}'"),
         ),
     )
-    op.alter_column("testcase_registry", "run_generation", server_default=None)
-    op.alter_column("testcase_registry", "last_result", server_default=None)
-
+    # Keep the server default for SQLite/PostgreSQL portability and safe\n    # out-of-ORM inserts; application defaults remain identical.\n    # Keep the server default for SQLite/PostgreSQL portability and safe\n    # out-of-ORM inserts; application defaults remain identical.\n
 
 def downgrade() -> None:
     op.drop_column("testcase_registry", "last_result")
