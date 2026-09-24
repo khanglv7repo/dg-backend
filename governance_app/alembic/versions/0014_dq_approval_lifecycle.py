@@ -36,7 +36,8 @@ def upgrade() -> None:
         "testcase_registry",
         sa.Column("approved_by", sa.String(length=255), nullable=True),
     )
-    op.alter_column("testcase_registry", "lifecycle_state", server_default=None)
+    # Keep the STAGED server default for cross-dialect compatibility. It is
+    # also the correct lifecycle default for rows created outside ORM paths.
 
 
 def downgrade() -> None:
