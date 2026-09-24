@@ -192,8 +192,15 @@ class TestCaseRegistryRepository:
         self.session.flush()
         return record
 
-    def mark_materialization_failed(self, record_id) -> None:
-        record = self.session.get(TestCaseRegistry, record_id)
+    def mark_materialization_failed(
+        self,
+        record_id,
+        *,
+        permanent: bool,
+    ) -> None:
+        record = self.get(record_id)
         if record is not None and record.lifecycle_state == "APPROVED":
             record.reservation_state = "FAILED"
+            if permanent:
+                record.lifecycle_state = "FAILED"
             self.session.flush()
