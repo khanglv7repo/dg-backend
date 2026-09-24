@@ -179,7 +179,7 @@ class TestCaseRegistryRepository:
         record = self.session.get(TestCaseRegistry, record_id)
         if record is None:
             raise ConflictError(f"testcase registry row {record_id!r} was not found")
-        if record.lifecycle_state not in {"APPROVED", "EXECUTABLE"}:
+        if record.lifecycle_state not in {"STAGED", "APPROVED", "EXECUTABLE"}:
             raise ConflictError(
                 f"testcase {record_id!r} cannot materialize from "
                 f"{record.lifecycle_state!r}"
