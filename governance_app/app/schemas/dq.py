@@ -35,6 +35,7 @@ class DQTestCaseResponse(ORMModel):
     run_generation: int = 0
     run_id: str | None = None
     run_status: Literal["QUEUED", "RUNNING", "COMPLETED", "FAILED"] | None = None
+    run_queued_at: datetime | None = None
     run_started_at: datetime | None = None
     run_finished_at: datetime | None = None
     run_requested_by: str | None = None
