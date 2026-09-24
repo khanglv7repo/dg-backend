@@ -286,7 +286,9 @@ class DQService:
         started_at = record.last_run_started_at
         if started_at.tzinfo is None:
             started_at = started_at.replace(tzinfo=UTC)
-        if timestamp < started_at:
+        result_ms = int(timestamp.timestamp() * 1000)
+        started_ms = int(started_at.timestamp() * 1000)
+        if result_ms < started_ms:
             return None
         return dict(result)
 
