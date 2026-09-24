@@ -25,6 +25,11 @@ def test_capabilities_describe_current_architecture() -> None:
     assert report["trino_verification"]["access"] is True
     assert report["trino_verification"]["mask_hash_character_columns"] is True
     assert report["trino_verification"]["row_filter"] is True
+    assert report["trino_verification"]["subject_scope"] == "DIRECT_USER_ONLY"
+    assert (
+        report["trino_verification"]["group_only_policy_behavior"]
+        == "VERIFICATION_UNAVAILABLE"
+    )
     assert (
         report["trino_verification"]["insufficient_evidence_behavior"]
         == "VERIFICATION_UNAVAILABLE"
