@@ -7,7 +7,7 @@ from sqlalchemy import DateTime, Index, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
-from app.models.job import UUID_TYPE, utcnow
+from app.models.job import JSON_TYPE, UUID_TYPE, utcnow
 
 
 class TestCaseRegistry(Base):
@@ -37,6 +37,8 @@ class TestCaseRegistry(Base):
     reserved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     worker_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    spec_payload: Mapped[dict] = mapped_column(JSON_TYPE, nullable=False, default=dict)
+    om_testcase_fqn: Mapped[str | None] = mapped_column(String(3072))
     lifecycle_state: Mapped[str] = mapped_column(
         String(32), nullable=False, default="STAGED"
     )
