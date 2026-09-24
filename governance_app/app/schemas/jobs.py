@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from app.schemas.common import ORMModel
 
@@ -23,10 +23,6 @@ class JobResponse(ORMModel):
     last_error_message: str | None
     created_at: datetime
     updated_at: datetime
-
-
-class JobRetryRequest(BaseModel):
-    reason: str = Field(min_length=3, max_length=1000)
 
 
 class CeleryTaskStatusResponse(BaseModel):
