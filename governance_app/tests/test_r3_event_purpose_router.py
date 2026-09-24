@@ -4,7 +4,7 @@ from __future__ import annotations
 from app.services.event_router import EventPurpose, EventPurposeRouter
 
 
-def test_real_om_entity_created_routes_classify_and_tag_sync() -> None:
+def test_real_om_entity_created_routes_tag_sync_only() -> None:
     """Real OpenMetadata entityCreated event (camelCase string from OM OpenAPI schema)."""
     event = {
         "id": "c62f2776-9289-4e78-bc46-ee2e604f3238",
@@ -23,7 +23,7 @@ def test_real_om_entity_created_routes_classify_and_tag_sync() -> None:
         },
     }
     purposes = EventPurposeRouter.route(event)
-    assert purposes == {EventPurpose.CLASSIFY, EventPurpose.TAG_SYNC}
+    assert purposes == {EventPurpose.TAG_SYNC}
 
 
 def test_real_om_tag_only_change_routes_only_tag_sync() -> None:
@@ -47,11 +47,10 @@ def test_real_om_tag_only_change_routes_only_tag_sync() -> None:
     }
     purposes = EventPurposeRouter.route(event)
     assert purposes == {EventPurpose.TAG_SYNC}
-    assert EventPurpose.CLASSIFY not in purposes, "Tag-only event MUST NOT route to CLASSIFY (prevents event loop!)"
 
 
-def test_real_om_description_change_routes_classify_only() -> None:
-    """Real OpenMetadata description change routes strictly to CLASSIFY."""
+def test_real_om_description_change_routes_none() -> None:
+    """Description changes do not trigger Backend classification."""
     event = {
         "id": "d1234567-89ab-cdef-0123-456789abcdef",
         "eventType": "entityFieldsChanged",
@@ -71,11 +70,11 @@ def test_real_om_description_change_routes_classify_only() -> None:
         },
     }
     purposes = EventPurposeRouter.route(event)
-    assert purposes == {EventPurpose.CLASSIFY}
+    assert purposes == set()
 
 
-def test_real_om_structural_column_change_routes_both() -> None:
-    """Real OpenMetadata column addition/deletion/update routes to CLASSIFY and TAG_SYNC."""
+def test_real_om_structural_column_change_routes_none() -> None:
+    """Structural changes alone do not create Backend-owned tagging work."""
     event = {
         "id": "f9876543-21ba-fedc-3210-fedcba987654",
         "eventType": "entityFieldsChanged",
@@ -94,11 +93,11 @@ def test_real_om_structural_column_change_routes_both() -> None:
         },
     }
     purposes = EventPurposeRouter.route(event)
-    assert purposes == {EventPurpose.CLASSIFY, EventPurpose.TAG_SYNC}
+    assert purposes == set()
 
 
-def test_real_om_mixed_structural_and_tag_routes_both() -> None:
-    """Mixed column structure + tag change routes to both CLASSIFY and TAG_SYNC."""
+def test_real_om_mixed_structural_and_tag_routes_tag_sync_only() -> None:
+    """Mixed change routes only the authoritative tag-state synchronization."""
     event = {
         "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
         "eventType": "entityFieldsChanged",
@@ -115,7 +114,7 @@ def test_real_om_mixed_structural_and_tag_routes_both() -> None:
         },
     }
     purposes = EventPurposeRouter.route(event)
-    assert purposes == {EventPurpose.CLASSIFY, EventPurpose.TAG_SYNC}
+    assert purposes == {EventPurpose.TAG_SYNC}
 
 
 def test_real_om_owner_follower_change_routes_none() -> None:
