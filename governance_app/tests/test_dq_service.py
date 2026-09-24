@@ -84,8 +84,9 @@ def test_stage_is_backend_only_and_does_not_require_openmetadata(session) -> Non
 
     record = service.registry.get(result["id"])
     assert record.lifecycle_state == "STAGED"
-    assert record.reservation_state == "RESERVED"
+    assert record.reservation_state == "NOT_STARTED"
     assert record.om_testcase_id is None
+    assert record.reservation_state == "RESERVED"
     assert record.spec_payload["column_name"] == "email"
 
 
