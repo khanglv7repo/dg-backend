@@ -40,6 +40,7 @@ def test_recovery_redispatches_approved_candidate_once() -> None:
         SimpleNamespace(id="approved-1")
     ]
     repository.crash_recovery_candidates.return_value = []
+    repository.run_recovery_candidates.return_value = []
 
     with patch.object(dq_task, "SessionLocal", return_value=_session_cm(session)), patch.object(
         dq_task, "TestCaseRegistryRepository", return_value=repository
@@ -47,7 +48,10 @@ def test_recovery_redispatches_approved_candidate_once() -> None:
         dq_task.materialize_approved_test_case, "delay"
     ) as delay, patch.object(
         dq_task, "get_settings",
-        return_value=SimpleNamespace(dq_registry_reservation_ttl_seconds=120),
+        return_value=SimpleNamespace(
+            dq_registry_reservation_ttl_seconds=120,
+            dq_runner_timeout_seconds=600,
+        ),
     ):
         result = dq_task.recover_testcase_registry.run()
 
@@ -68,15 +72,20 @@ def test_legacy_staged_reserved_row_reconciles_existing_om_testcase() -> None:
         spec_payload={},
     )
     repository.crash_recovery_candidates.return_value = [legacy]
+    repository.run_recovery_candidates.return_value = []
     om = MagicMock()
     om.find_test_case_by_entity_and_name.return_value = {
         "id": "om-legacy",
         "fullyQualifiedName": "dev.sales.customer.dg_legacy",
-        "testSuite": {"id": "suite-1"},
+        "testSuite": {
+            "id": "suite-1",
+            "fullyQualifiedName": "dev.sales.customer.testSuite",
+        },
     }
 
     settings = SimpleNamespace(
         dq_registry_reservation_ttl_seconds=120,
+        dq_runner_timeout_seconds=600,
         openmetadata_execution_bot_token=None,
         openmetadata_base_url="http://om/api",
         openmetadata_timeout_seconds=10,
@@ -93,6 +102,7 @@ def test_legacy_staged_reserved_row_reconciles_existing_om_testcase() -> None:
         "legacy-1",
         om_testcase_id="om-legacy",
         om_testcase_fqn="dev.sales.customer.dg_legacy",
+        om_test_suite_fqn="dev.sales.customer.testSuite",
     )
     assert result["reconciled"] == 1
     assert result["redispatched"] == 0
@@ -141,3 +151,89 @@ def test_materialize_task_nonretryable_om_failure_marks_failed() -> None:
     repository.mark_materialization_failed.assert_called_once_with(
         "r1", permanent=True
     )
+
+
+def test_run_task_reads_om_result_and_treats_assertion_failure_as_completed() -> None:
+    session = MagicMock()
+    om = MagicMock()
+    runner = MagicMock()
+    service = MagicMock()
+    service.mark_run_started.return_value = {
+        "run_status": "RUNNING",
+    }
+    service.latest_result_for_active_run.side_effect = [
+        None,
+        {
+            "timestamp": 1234567890000,
+            "testCaseStatus": "Failed",
+            "testResultValue": [],
+        },
+    ]
+    service.get.return_value = {
+        "target_entity_fqn": "dev.sales.customer",
+        "om_test_suite_fqn": "dev.sales.customer.testSuite",
+        "natural_key_hash": "dg_case",
+    }
+    service.complete_run.return_value = {
+        "id": "r1",
+        "run_id": "run-1",
+        "run_status": "COMPLETED",
+        "last_result": {
+            "testCaseStatus": "Failed",
+        },
+    }
+
+    settings = SimpleNamespace(
+        dq_runner_url="http://metadata-ingestion:8080",
+        dq_runner_timeout_seconds=600,
+    )
+
+    with patch.object(dq_task, "SessionLocal", return_value=_session_cm(session)), patch.object(
+        dq_task, "_execution_om_client", return_value=om
+    ), patch.object(dq_task, "DQService", return_value=service), patch.object(
+        dq_task, "DQRunnerClient", return_value=runner
+    ), patch.object(
+        dq_task, "get_settings", return_value=settings
+    ):
+        result = dq_task.run_executable_test_case.run(
+            registry_id="r1",
+            run_id="run-1",
+        )
+
+    runner.run_test_case.assert_called_once_with(
+        table_fqn="dev.sales.customer",
+        test_suite_fqn="dev.sales.customer.testSuite",
+        test_case_name="dg_case",
+    )
+    service.complete_run.assert_called_once()
+    assert result["run_status"] == "COMPLETED"
+    assert result["last_result"]["testCaseStatus"] == "Failed"
+    runner.close.assert_called_once()
+    om.close.assert_called_once()
+
+
+def test_recovery_redispatches_stale_run_with_same_run_id() -> None:
+    session = MagicMock()
+    repository = MagicMock()
+    repository.approved_materialization_candidates.return_value = []
+    repository.crash_recovery_candidates.return_value = []
+    repository.run_recovery_candidates.return_value = [
+        SimpleNamespace(id="r1", active_run_id="run-1")
+    ]
+
+    settings = SimpleNamespace(
+        dq_registry_reservation_ttl_seconds=120,
+        dq_runner_timeout_seconds=600,
+    )
+
+    with patch.object(dq_task, "SessionLocal", return_value=_session_cm(session)), patch.object(
+        dq_task, "TestCaseRegistryRepository", return_value=repository
+    ), patch.object(
+        dq_task.run_executable_test_case, "delay"
+    ) as delay, patch.object(
+        dq_task, "get_settings", return_value=settings
+    ):
+        result = dq_task.recover_testcase_registry.run()
+
+    delay.assert_called_once_with(registry_id="r1", run_id="run-1")
+    assert result["run_redispatched"] == 1
