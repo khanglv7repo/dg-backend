@@ -225,7 +225,7 @@ def test_mask_hash_is_confirmed_against_control_transformation() -> None:
     subject = FakeTrino(
         result={
             "query_id": "subject-q",
-            "rows": [["A1"], ["B2"]],
+            "rows": [["varchar", "A1"], ["varchar", "B2"]],
         }
     )
     control = FakeTrino(
@@ -331,3 +331,23 @@ def test_control_identity_must_differ_from_policy_identity() -> None:
             trino_readonly_user="alice",
             trino_verification_control_user="alice",
         )
+
+
+def test_mask_hash_non_character_column_is_unavailable() -> None:
+    result = PolicyRuntimeVerificationService(
+        settings(control_user="control", window=1),
+        trino_service=FakeTrino(
+            result={"rows": [["1234"]], "query_id": "subject"}
+        ),
+        control_trino_service=FakeTrino(
+            result={"rows": [["bigint", "abcd"]], "query_id": "control"}
+        ),
+    ).verify(
+        logical_policy=policy(with_mask=True),
+        projection_type="MASK",
+        projection_key=mask_projection_key(),
+        ranger_apply_timestamp=utcnow() - timedelta(seconds=100),
+    )
+
+    assert result["status"] == "VERIFICATION_UNAVAILABLE"
+    assert "character columns" in result["reason"]
