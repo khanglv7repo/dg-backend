@@ -4,10 +4,8 @@ audit (2026-09-24, planning/EXECUTION_LOG.md):
 1. A FAILED registry row used to permanently block all future retries with
    409 CONFLICT forever -- no retry path existed despite a code comment
    claiming one did. Fixed via TestCaseRegistryRepository.retry_after_failure().
-2. Idempotent retry of a successfully-created TestCase always reported
-   status="EXECUTABLE", even though no STAGED->EXECUTABLE transition code
-   exists anywhere -- confirmed_at was conflated with OM's own executable
-   state. Fixed to always report "STAGED" on the idempotent-return path.
+2. Idempotent retry reports the persisted lifecycle state instead of deriving
+   executability from reservation confirmation.
 
 Both bugs were live-verified against a real running Backend + OpenMetadata
 instance before being fixed here; these tests are the permanent regression
@@ -136,10 +134,8 @@ def test_second_call_by_different_worker_is_reserved_conflict(session) -> None:
     om.create_test_case.assert_not_called()
 
 
-def test_idempotent_retry_of_confirmed_row_always_reports_staged(session) -> None:
-    """Regression for bug 2: a successfully-created TestCase must always
-    report STAGED on retry, never EXECUTABLE (no EXECUTABLE-transition code
-    exists anywhere in this codebase yet)."""
+def test_idempotent_retry_of_confirmed_row_reports_persisted_lifecycle(session) -> None:
+    """Reservation confirmation and DQ lifecycle are separate state machines."""
     om = om_client(create_result={"id": "om-tc-1"})
     svc = service(session, om=om)
 
@@ -274,3 +270,76 @@ def test_retry_after_failure_twice_in_a_row_keeps_working(session) -> None:
     )
     assert result["status"] == "STAGED"
     assert result["om_testcase_id"] == "om-final"
+
+
+def test_human_approval_transitions_staged_to_approved(session) -> None:
+    svc = service(session, om=om_client(create_result={"id": "om-tc-approve"}))
+    staged = svc.create_staged_test_case(
+        target_asset_fqn="financial.crm.customers",
+        test_definition_fqn="columnValuesToBeNotNull",
+        parameter_values={},
+        rule_id="rule-approve",
+        test_key=None,
+        column_name="email",
+        worker_id="worker-1",
+    )
+
+    approved = svc.approve_staged_test_case(
+        registry_id=staged["id"],
+        actor_id="operator-1",
+    )
+
+    assert approved["status"] == "APPROVED"
+    record = svc.registry.get(staged["id"])
+    assert record.lifecycle_state == "APPROVED"
+    assert record.approved_by == "operator-1"
+    assert record.approved_at is not None
+
+
+def test_approval_is_idempotent_and_does_not_touch_openmetadata(session) -> None:
+    om = om_client(create_result={"id": "om-tc-approve"})
+    svc = service(session, om=om)
+    staged = svc.create_staged_test_case(
+        target_asset_fqn="financial.crm.customers",
+        test_definition_fqn="columnValuesToBeNotNull",
+        parameter_values={},
+        rule_id="rule-approve-idempotent",
+        test_key=None,
+        column_name=None,
+        worker_id="worker-1",
+    )
+    first = svc.approve_staged_test_case(
+        registry_id=staged["id"], actor_id="operator-1"
+    )
+    second = svc.approve_staged_test_case(
+        registry_id=staged["id"], actor_id="operator-2"
+    )
+
+    assert first["status"] == second["status"] == "APPROVED"
+    assert svc.registry.get(staged["id"]).approved_by == "operator-1"
+    om.create_test_case.assert_called_once()
+
+
+def test_idempotent_create_after_approval_returns_approved(session) -> None:
+    svc = service(session, om=om_client(create_result={"id": "om-tc-approved"}))
+    first = svc.create_staged_test_case(
+        target_asset_fqn="a.b.approved",
+        test_definition_fqn="d",
+        parameter_values={},
+        rule_id="r-approved",
+        test_key=None,
+        column_name=None,
+        worker_id="w1",
+    )
+    svc.approve_staged_test_case(registry_id=first["id"], actor_id="operator")
+
+    second = svc.create_staged_test_case(
+        target_asset_fqn="a.b.approved",
+        test_definition_fqn="d",
+        parameter_values={},
+        rule_id="r-approved",
+        test_key=None,
+        column_name=None,
+        worker_id="w2",
+    )
+    assert second["status"] == "APPROVED"
