@@ -54,3 +54,4 @@ class DQRunAcceptedResponse(BaseModel):
     run_id: str
     status: Literal["QUEUED"]
     task_id: str | None = None
+    execution_semantics: Literal["AT_LEAST_ONCE"] = "AT_LEAST_ONCE"
