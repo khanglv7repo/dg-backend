@@ -161,3 +161,12 @@ class RangerPolicyProjection(Base):
         onupdate=utcnow,
     )
     last_reconciled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    verification_status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="UNVERIFIED"
+    )
+    verification_details: Mapped[dict] = mapped_column(
+        R4_MUTABLE_DICT_JSON_TYPE,
+        nullable=False,
+        default=dict,
+    )
+    last_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
