@@ -44,35 +44,51 @@ def test_outbox_unknown_event_fails_instead_of_being_marked_delivered() -> None:
         outbox_task._publish(record)
 
 
-def test_trino_verification_without_real_plan_never_reports_runtime_drift() -> None:
+def test_trino_verification_disabled_marks_synchronized_projection_unavailable() -> None:
     db = MagicMock()
-    db.execute.return_value.scalar_one.return_value = 3
+    db.scalars.return_value = []
     session_cm = MagicMock()
     session_cm.__enter__.return_value = db
     session_cm.__exit__.return_value = False
 
-    with patch.object(policy_task, "SessionLocal", return_value=session_cm):
-        result = policy_task.verify_trino_policy_enforcement.run()
-
-    assert result == {
-        "status": "VERIFICATION_UNAVAILABLE",
-        "confirmed": 0,
-        "pending": 0,
-        "drift": 0,
-        "unavailable": 3,
-    }
-
-
-def test_trino_verification_no_projection_is_not_drift() -> None:
-    db = MagicMock()
-    db.execute.return_value.scalar_one.return_value = 0
-    session_cm = MagicMock()
-    session_cm.__enter__.return_value = db
-    session_cm.__exit__.return_value = False
-
-    with patch.object(policy_task, "SessionLocal", return_value=session_cm):
+    with patch.object(policy_task, "SessionLocal", return_value=session_cm), patch.object(
+        policy_task,
+        "get_settings",
+        return_value=MagicMock(
+            trino_readonly_enabled=False,
+            trino_readonly_user=None,
+        ),
+    ):
         result = policy_task.verify_trino_policy_enforcement.run()
 
     assert result["status"] == "NO_PROJECTIONS"
     assert result["drift"] == 0
     assert result["unavailable"] == 0
+
+
+def test_trino_verification_disabled_never_reports_drift_for_existing_projection() -> None:
+    projection = SimpleNamespace(
+        verification_status="UNVERIFIED",
+        verification_details={},
+        last_verified_at=None,
+    )
+    db = MagicMock()
+    db.scalars.return_value = [projection]
+    session_cm = MagicMock()
+    session_cm.__enter__.return_value = db
+    session_cm.__exit__.return_value = False
+
+    with patch.object(policy_task, "SessionLocal", return_value=session_cm), patch.object(
+        policy_task,
+        "get_settings",
+        return_value=MagicMock(
+            trino_readonly_enabled=False,
+            trino_readonly_user=None,
+        ),
+    ):
+        result = policy_task.verify_trino_policy_enforcement.run()
+
+    assert result["status"] == "VERIFICATION_UNAVAILABLE"
+    assert result["drift"] == 0
+    assert result["unavailable"] == 1
+    assert projection.verification_status == "VERIFICATION_UNAVAILABLE"
