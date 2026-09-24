@@ -91,6 +91,15 @@ class OpenMetadataClient:
         }
         return self._request("POST", "/v1/dataQuality/testCases", json=body)
 
+    def get_test_suite_by_name(self, fqn: str) -> dict:
+        """Read one TestSuite by FQN to verify its executable/basic semantics."""
+        encoded = quote(fqn, safe="")
+        return self._request(
+            "GET",
+            f"/v1/dataQuality/testSuites/name/{encoded}",
+            params={"fields": "tests"},
+        )
+
     def get_test_case_by_name(
         self,
         fqn: str,
