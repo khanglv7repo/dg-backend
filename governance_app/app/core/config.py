@@ -61,10 +61,6 @@ class Settings(BaseSettings):
             "OM_AUTOCLASSIFICATION_BOT_TOKEN",
         ),
     )
-    openmetadata_auto_tag_bot_token: SecretStr | None = Field(
-        default=None,
-        validation_alias=AliasChoices("OM_AUTO_TAG_BOT_TOKEN"),
-    )
     openmetadata_ingestion_bot_token: SecretStr | None = Field(
         default=None,
         validation_alias=AliasChoices("OM_INGESTION_BOT_TOKEN"),
@@ -232,7 +228,6 @@ class Settings(BaseSettings):
             token.get_secret_value()
             for token in (
                 self.openmetadata_execution_bot_token,
-                self.openmetadata_auto_tag_bot_token,
                 self.openmetadata_ingestion_bot_token,
             )
             if token
@@ -240,9 +235,7 @@ class Settings(BaseSettings):
 
         if len(worker_tokens) != len(set(worker_tokens)):
             raise ValueError(
-                "OpenMetadata ingestion, "
-                "auto-classification, and auto-tag "
-                "bot tokens must be different"
+                "OpenMetadata ingestion and execution bot tokens must be different"
             )
 
         return self
