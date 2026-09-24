@@ -18,7 +18,6 @@ from app.core.errors import AuthorizationError
 from app.repositories.audit import AuditRepository
 from app.repositories.event_inbox import EventInboxRepository
 from app.services.event_router import EventPurpose, EventPurposeRouter
-from app.tasks.tag_override_guard import NATIVE_CLASSIFIER_ACTORS, restore_overridden_tag
 from app.tasks.tag_sync import sync_tags_to_ranger
 from app.tasks.task_resolution import resolve_task_followup
 
@@ -81,17 +80,6 @@ class OpenMetadataEventAdapterService:
 
         if not event_id:
             event_id = f"evt-{timestamp}-{hash(entity_fqn)}"
-
-        # C4 conservative fallback (BLOCKED -> auto-restore-on-override,
-        # docs/13_IMPLEMENTATION_SPEC.md section 9): a tag removed by an
-        # actor identified as OM's native classifier is treated as an
-        # unauthorized override and restored immediately.
-        self._maybe_restore_overridden_tags(
-            event_data,
-            entity_type=entity_type,
-            entity_fqn=entity_fqn,
-            correlation_id=correlation_id,
-        )
 
         purposes = EventPurposeRouter.route(event_data)
         purpose_strings = sorted(p.value for p in purposes)
@@ -176,61 +164,3 @@ class OpenMetadataEventAdapterService:
             "dispatched_tasks": dispatched_tasks,
         }
 
-    @staticmethod
-    def _maybe_restore_overridden_tags(
-        event_data: dict[str, Any],
-        *,
-        entity_type: str,
-        entity_fqn: str,
-        correlation_id: str | None,
-    ) -> None:
-        actor = str(event_data.get("userName") or "").strip()
-        if actor not in NATIVE_CLASSIFIER_ACTORS:
-            return
-
-        change_desc = event_data.get("changeDescription") or {}
-        for change in change_desc.get("fieldsDeleted", []) or []:
-            if not isinstance(change, dict):
-                continue
-            name = str(change.get("name") or "")
-            old_value = change.get("oldValue")
-            removed_tag_fqns = OpenMetadataEventAdapterService._extract_tag_fqns(old_value)
-            if not removed_tag_fqns:
-                continue
-
-            field_path = (
-                name.split(".", 1)[1] if name.startswith("columns.") else None
-            )
-            restore_overridden_tag.delay(
-                entity_type=entity_type,
-                entity_fqn=entity_fqn,
-                removed_tag_fqns=removed_tag_fqns,
-                field_path=field_path,
-                correlation_id=correlation_id,
-            )
-
-    @staticmethod
-    def _extract_tag_fqns(value: Any) -> list[str]:
-        """Extract tagFQN values from a ChangeEvent oldValue, which may be a
-        JSON-encoded string, a raw TagLabel dict, or a list of TagLabel
-        dicts (C3's confirmed TagLabel schema).
-        """
-        import json as _json
-
-        if isinstance(value, str):
-            try:
-                value = _json.loads(value)
-            except ValueError:
-                return []
-
-        if isinstance(value, dict):
-            value = [value]
-
-        if not isinstance(value, list):
-            return []
-
-        return [
-            str(item["tagFQN"])
-            for item in value
-            if isinstance(item, dict) and item.get("tagFQN")
-        ]
