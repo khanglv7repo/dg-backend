@@ -102,6 +102,14 @@ class TestCaseRegistryRepository:
         self.session.flush()
         return record
 
+    def approved_materialization_candidates(self) -> list[TestCaseRegistry]:
+        return list(
+            self.session.query(TestCaseRegistry)
+            .filter(TestCaseRegistry.lifecycle_state == "APPROVED")
+            .filter(TestCaseRegistry.om_testcase_id.is_(None))
+            .all()
+        )
+
     def crash_recovery_candidates(self, *, stale_after_seconds: int) -> list[TestCaseRegistry]:
         """RESERVED rows past their reservation TTL with no om_testcase_id --
         candidates for a crash-recovery pass that re-queries OM by
