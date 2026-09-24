@@ -1,4 +1,4 @@
-.PHONY: install test dev backend api mcp-server execution-worker migrate lint verify-openapi celery-worker worker-tag-sync celery-beat
+.PHONY: install test dev backend api mcp-server migrate lint verify-openapi celery-worker worker-tag-sync celery-beat
 
 install:
 	python -m pip install -e '.[dev,postgres,trino]'
@@ -16,9 +16,6 @@ api:
 
 mcp-server:
 	MCP_ENABLED=true python -m app.mcp.backend_mcp_server
-
-execution-worker:
-	python -m app.workers.execution_worker
 
 celery-worker:
 	python -m celery -A app.celery_app worker -Q default -c 4 --loglevel=info
