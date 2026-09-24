@@ -37,3 +37,8 @@ class TestCaseRegistry(Base):
     reserved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     worker_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    lifecycle_state: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="STAGED"
+    )
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    approved_by: Mapped[str | None] = mapped_column(String(255))
