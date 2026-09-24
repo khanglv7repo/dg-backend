@@ -164,6 +164,15 @@ def test_materialization_creates_then_requires_basic_suite_readback(session) -> 
         "fullyQualifiedName": "financial.crm.customers.email.dg_abc",
         "testSuite": {"id": "suite-1", "type": "testSuite", "fullyQualifiedName": "financial.crm.customers.testSuite"},
     }
+    om.get_test_suite_by_name.return_value = {
+        "name": "financial.crm.customers.testSuite",
+        "fullyQualifiedName": "financial.crm.customers.testSuite",
+        "basic": True,
+        "basicEntityReference": {
+            "type": "table",
+            "fullyQualifiedName": "financial.crm.customers",
+        },
+    }
     service.om_client = om
 
     result = service.materialize_approved_test_case(registry_id=approval["id"])
@@ -185,6 +194,15 @@ def test_materialization_reuses_existing_om_testcase_after_crash(session) -> Non
         "name": service.registry.get(approval["id"]).natural_key_hash,
         "fullyQualifiedName": "financial.crm.customers.email.dg_existing",
         "testSuite": {"id": "suite-1", "type": "testSuite", "fullyQualifiedName": "financial.crm.customers.testSuite"},
+    }
+    om.get_test_suite_by_name.return_value = {
+        "name": "financial.crm.customers.testSuite",
+        "fullyQualifiedName": "financial.crm.customers.testSuite",
+        "basic": True,
+        "basicEntityReference": {
+            "type": "table",
+            "fullyQualifiedName": "financial.crm.customers",
+        },
     }
     service.om_client = om
 
@@ -233,6 +251,15 @@ def test_prepare_run_creates_single_active_generation(session) -> None:
             "fullyQualifiedName": "financial.crm.customers.testSuite",
         },
     }
+    om.get_test_suite_by_name.return_value = {
+        "name": "financial.crm.customers.testSuite",
+        "fullyQualifiedName": "financial.crm.customers.testSuite",
+        "basic": True,
+        "basicEntityReference": {
+            "type": "table",
+            "fullyQualifiedName": "financial.crm.customers",
+        },
+    }
     service.om_client = om
     executable = service.materialize_approved_test_case(
         registry_id=approval["id"]
@@ -263,6 +290,15 @@ def test_latest_result_for_active_run_rejects_old_result_and_accepts_new(session
         "testSuite": {
             "id": "suite-1",
             "fullyQualifiedName": "financial.crm.customers.testSuite",
+        },
+    }
+    om.get_test_suite_by_name.return_value = {
+        "name": "financial.crm.customers.testSuite",
+        "fullyQualifiedName": "financial.crm.customers.testSuite",
+        "basic": True,
+        "basicEntityReference": {
+            "type": "table",
+            "fullyQualifiedName": "financial.crm.customers",
         },
     }
     service.om_client = om
@@ -315,3 +351,66 @@ def test_latest_result_for_active_run_rejects_old_result_and_accepts_new(session
     )
     assert completed["run_status"] == "COMPLETED"
     assert completed["last_result"]["testCaseStatus"] == "Failed"
+
+
+def test_materialization_rejects_logical_test_suite(session) -> None:
+    service, approval = approved(session)
+    om = MagicMock()
+    om.find_test_case_by_entity_and_name.return_value = {
+        "id": "om-logical",
+        "name": "dg_logical",
+        "fullyQualifiedName": "financial.crm.customers.email.dg_logical",
+        "testSuite": {
+            "id": "suite-logical",
+            "fullyQualifiedName": "logical_quality_suite",
+        },
+    }
+    om.get_test_suite_by_name.return_value = {
+        "id": "suite-logical",
+        "fullyQualifiedName": "logical_quality_suite",
+        "basic": False,
+        "executable": False,
+    }
+    service.om_client = om
+
+    with pytest.raises(
+        ExternalSystemError,
+        match="logical/non-executable TestSuite",
+    ):
+        service.materialize_approved_test_case(registry_id=approval["id"])
+
+    record = service.registry.get(approval["id"])
+    assert record.lifecycle_state == "APPROVED"
+    assert record.om_testcase_id is None
+
+
+def test_materialization_rejects_basic_suite_for_different_table(session) -> None:
+    service, approval = approved(session)
+    om = MagicMock()
+    om.find_test_case_by_entity_and_name.return_value = {
+        "id": "om-wrong-table",
+        "name": "dg_wrong_table",
+        "fullyQualifiedName": "financial.crm.customers.email.dg_wrong_table",
+        "testSuite": {
+            "id": "suite-other",
+            "fullyQualifiedName": "financial.crm.other.testSuite",
+        },
+    }
+    om.get_test_suite_by_name.return_value = {
+        "id": "suite-other",
+        "fullyQualifiedName": "financial.crm.other.testSuite",
+        "basic": True,
+        "basicEntityReference": {
+            "type": "table",
+            "fullyQualifiedName": "financial.crm.other",
+        },
+    }
+    service.om_client = om
+
+    with pytest.raises(
+        ExternalSystemError,
+        match="different entity",
+    ):
+        service.materialize_approved_test_case(registry_id=approval["id"])
+
+    assert service.registry.get(approval["id"]).lifecycle_state == "APPROVED"
