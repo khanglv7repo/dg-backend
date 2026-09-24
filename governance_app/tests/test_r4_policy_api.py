@@ -17,7 +17,6 @@ from app.api.router import api_router
 from app.api.routes import data_access_policies
 from app.clients.ranger import RangerClient
 from app.core.config import Settings
-from app.core.errors import ExternalSystemError
 from app.core.security import Actor
 from app.db.base import Base
 from app.models.audit import AuditEvent  # noqa: F401
@@ -25,6 +24,7 @@ from app.models.data_access_policy import (
     DataAccessPolicyVersion,
     RangerPolicyProjection,
 )  # noqa: F401
+from app.models.event_outbox import EventOutbox
 from app.models.job import GovernanceJob
 
 
@@ -90,6 +90,7 @@ def admin_headers() -> dict[str, str]:
     }
 
 
+
 def test_real_fastapi_testclient_create_preview_activate_status_vertical_slice() -> None:
     factory, engine = build_test_db()
 
@@ -107,21 +108,11 @@ def test_real_fastapi_testclient_create_preview_activate_status_vertical_slice()
     ranger.group_exists.side_effect = lambda name: name == "pii_readers"
     ranger.find_by_name.return_value = None
 
-    def assert_committed_before_dispatch(*, policy_version_id: str, **_kwargs) -> None:
-        with factory() as verification_db:
-            durable = verification_db.get(
-                DataAccessPolicyVersion,
-                UUID(policy_version_id),
-            )
-            assert durable is not None
-            assert durable.status == "ACTIVE"
-
     with patch.object(
         data_access_policies,
         "build_resource_ranger_client",
         return_value=ranger,
-    ), patch.object(data_access_policies.sync_policy_to_ranger, "delay") as delay:
-        delay.side_effect = assert_committed_before_dispatch
+    ):
         with TestClient(app) as client:
             created = client.post(
                 "/api/v1/data-access-policies/http.sales.customer/versions",
@@ -129,9 +120,7 @@ def test_real_fastapi_testclient_create_preview_activate_status_vertical_slice()
                 headers=admin_headers(),
             )
             assert created.status_code == 201, created.text
-            created_body = created.json()
-            assert created_body["status"] == "DRAFT"
-            version_id = created_body["id"]
+            version_id = created.json()["id"]
 
             preview = client.post(
                 "/api/v1/data-access-policies/http.sales.customer/preview",
@@ -139,14 +128,9 @@ def test_real_fastapi_testclient_create_preview_activate_status_vertical_slice()
                 headers=admin_headers(),
             )
             assert preview.status_code == 200, preview.text
-            projection_types = {
+            assert {
                 item["projection_type"] for item in preview.json()["projections"]
-            }
-            assert projection_types == {"ACCESS", "MASK", "ROW_FILTER"}
-            assert all(
-                item["action"] == "CREATE"
-                for item in preview.json()["projections"]
-            )
+            } == {"ACCESS", "MASK", "ROW_FILTER"}
             ranger.reconcile_document.assert_not_called()
 
             activated = client.post(
@@ -155,24 +139,23 @@ def test_real_fastapi_testclient_create_preview_activate_status_vertical_slice()
             )
             assert activated.status_code == 202, activated.text
             assert activated.json()["version"]["status"] == "ACTIVE"
-            delay.assert_called_once_with(
-                policy_version_id=version_id,
-                correlation_id=None,
-            )
-            ranger.reconcile_document.assert_not_called()
+            assert activated.json()["dispatched"] is False
 
             status_response = client.get(
                 "/api/v1/data-access-policies/http.sales.customer/status",
                 headers=admin_headers(),
             )
-            assert status_response.status_code == 200, status_response.text
+            assert status_response.status_code == 200
             body = status_response.json()
             assert body["active_version"]["version"] == 1
-            assert body["active_version"]["status"] == "ACTIVE"
             assert {row["sync_status"] for row in body["projections"]} == {"PENDING"}
             assert len(body["projections"]) == 3
 
     with factory() as verification_db:
+        outbox = verification_db.query(EventOutbox).one()
+        assert outbox.status == "PENDING"
+        assert outbox.event_type == "policy.version.activated"
+        assert outbox.payload["policy_version_id"] == version_id
         assert verification_db.query(GovernanceJob).count() == 0
 
     Base.metadata.drop_all(engine)
@@ -186,21 +169,11 @@ def test_fastapi_create_preview_activate_status_vertical_slice() -> None:
     ranger.group_exists.side_effect = lambda name: name == "pii_readers"
     ranger.find_by_name.return_value = None
 
-    def assert_committed_before_dispatch(*, policy_version_id: str, **_kwargs) -> None:
-        with factory() as verification_db:
-            durable = verification_db.get(
-                DataAccessPolicyVersion,
-                UUID(policy_version_id),
-            )
-            assert durable is not None
-            assert durable.status == "ACTIVE"
-
     with patch.object(
         data_access_policies,
         "build_resource_ranger_client",
         return_value=ranger,
-    ), patch.object(data_access_policies.sync_policy_to_ranger, "delay") as delay:
-        delay.side_effect = assert_committed_before_dispatch
+    ):
         with factory() as db:
             created = data_access_policies.create_policy_version(
                 "sales.customer",
@@ -211,7 +184,6 @@ def test_fastapi_create_preview_activate_status_vertical_slice() -> None:
                 TEST_SETTINGS,
                 admin_actor(),
             )
-        assert created.status == "DRAFT"
         version_id = str(created.id)
 
         with factory() as db:
@@ -229,8 +201,6 @@ def test_fastapi_create_preview_activate_status_vertical_slice() -> None:
             "MASK",
             "ROW_FILTER",
         }
-        assert all(item.action == "CREATE" for item in preview.projections)
-        ranger.reconcile_document.assert_not_called()
 
         with factory() as db:
             activated = data_access_policies.activate_policy_version(
@@ -241,11 +211,7 @@ def test_fastapi_create_preview_activate_status_vertical_slice() -> None:
                 admin_actor(),
             )
         assert activated.version.status == "ACTIVE"
-        delay.assert_called_once_with(
-            policy_version_id=version_id,
-            correlation_id=None,
-        )
-        ranger.reconcile_document.assert_not_called()
+        assert activated.dispatched is False
 
         with factory() as db:
             status_response = data_access_policies.get_policy_status(
@@ -256,32 +222,28 @@ def test_fastapi_create_preview_activate_status_vertical_slice() -> None:
             )
         assert status_response.active_version.version == 1
         assert {row.sync_status for row in status_response.projections} == {"PENDING"}
-        assert len(status_response.projections) == 3
 
         with factory() as verification_db:
+            assert verification_db.query(EventOutbox).count() == 1
+            event = verification_db.query(EventOutbox).one()
+            assert event.payload["policy_version_id"] == version_id
+            assert event.status == "PENDING"
             assert verification_db.query(GovernanceJob).count() == 0
 
     Base.metadata.drop_all(engine)
 
 
-def test_activation_broker_failure_recovery_republishes_same_active_version() -> None:
+def test_activation_retry_is_noop_and_does_not_duplicate_outbox() -> None:
     factory, engine = build_test_db()
     ranger = create_autospec(RangerClient, instance=True)
     ranger.user_exists.return_value = True
     ranger.group_exists.return_value = True
-    published: list[str] = []
-
-    def publish_or_fail(*, policy_version_id: str, **_kwargs) -> None:
-        published.append(policy_version_id)
-        if len(published) == 1:
-            raise RuntimeError("broker unavailable")
 
     with patch.object(
         data_access_policies,
         "build_resource_ranger_client",
         return_value=ranger,
-    ), patch.object(data_access_policies.sync_policy_to_ranger, "delay") as delay:
-        delay.side_effect = publish_or_fail
+    ):
         with factory() as db:
             created = data_access_policies.create_policy_version(
                 "retry.activation",
@@ -294,45 +256,30 @@ def test_activation_broker_failure_recovery_republishes_same_active_version() ->
             )
         version_id = str(created.id)
 
-        with pytest.raises(ExternalSystemError) as excinfo:
-            with factory() as db:
-                data_access_policies.activate_policy_version(
-                    "retry.activation",
-                    1,
-                    db,
-                    TEST_SETTINGS,
-                    admin_actor(),
-                )
-        assert excinfo.value.retryable is True
-        assert excinfo.value.details["policy_version_id"] == version_id
-
         with factory() as db:
-            durable = db.get(DataAccessPolicyVersion, UUID(version_id))
-            assert durable is not None
-            assert durable.status == "ACTIVE"
-            first_activated_at = durable.activated_at
-            assert (
-                db.query(AuditEvent)
-                .filter(AuditEvent.action == "DATA_ACCESS_POLICY_VERSION_ACTIVATED")
-                .count()
-                == 1
-            )
-
-        with factory() as db:
-            recovered = data_access_policies.activate_policy_version(
+            first = data_access_policies.activate_policy_version(
                 "retry.activation",
                 1,
                 db,
                 TEST_SETTINGS,
                 admin_actor(),
             )
-        assert recovered.version.id == UUID(version_id)
+        assert first.version.status == "ACTIVE"
+        assert first.dispatched is False
 
         with factory() as db:
-            durable = db.get(DataAccessPolicyVersion, UUID(version_id))
-            assert durable is not None
-            assert durable.status == "ACTIVE"
-            assert durable.activated_at == first_activated_at
+            second = data_access_policies.activate_policy_version(
+                "retry.activation",
+                1,
+                db,
+                TEST_SETTINGS,
+                admin_actor(),
+            )
+        assert second.version.id == UUID(version_id)
+        assert second.dispatched is False
+
+        with factory() as db:
+            assert db.query(EventOutbox).count() == 1
             assert (
                 db.query(AuditEvent)
                 .filter(AuditEvent.action == "DATA_ACCESS_POLICY_VERSION_ACTIVATED")
@@ -345,29 +292,21 @@ def test_activation_broker_failure_recovery_republishes_same_active_version() ->
                 .count()
                 == 1
             )
-        assert published == [version_id, version_id]
 
     Base.metadata.drop_all(engine)
 
 
-def test_rollback_broker_failure_recovery_targets_explicit_version_without_walkback() -> None:
+def test_rollback_queues_one_outbox_event_and_retry_is_noop() -> None:
     factory, engine = build_test_db()
     ranger = create_autospec(RangerClient, instance=True)
     ranger.user_exists.return_value = True
     ranger.group_exists.return_value = True
-    published: list[str] = []
-
-    def publish_or_fail(*, policy_version_id: str, **_kwargs) -> None:
-        published.append(policy_version_id)
-        if len(published) == 4:
-            raise RuntimeError("broker unavailable after rollback commit")
 
     with patch.object(
         data_access_policies,
         "build_resource_ranger_client",
         return_value=ranger,
-    ), patch.object(data_access_policies.sync_policy_to_ranger, "delay") as delay:
-        delay.side_effect = publish_or_fail
+    ):
         version_ids: dict[int, str] = {}
         for version, user in [(1, "alice"), (2, "bob"), (3, "carol")]:
             with factory() as db:
@@ -382,59 +321,37 @@ def test_rollback_broker_failure_recovery_targets_explicit_version_without_walkb
                 )
             version_ids[version] = str(created.id)
             with factory() as db:
-                activated = data_access_policies.activate_policy_version(
+                result = data_access_policies.activate_policy_version(
                     "retry.rollback",
                     version,
                     db,
                     TEST_SETTINGS,
                     admin_actor(),
                 )
-            assert activated.version.version == version
-
-        with pytest.raises(ExternalSystemError) as excinfo:
-            with factory() as db:
-                data_access_policies.rollback_policy(
-                    "retry.rollback",
-                    data_access_policies.RollbackPolicyRequest(target_version=2),
-                    db,
-                    TEST_SETTINGS,
-                    admin_actor(),
-                )
-        assert excinfo.value.retryable is True
+            assert result.version.version == version
+            assert result.dispatched is False
 
         with factory() as db:
-            states = {
-                row.version: row.status
-                for row in db.query(DataAccessPolicyVersion)
-                .filter(DataAccessPolicyVersion.policy_key == "retry.rollback")
-                .all()
-            }
-            assert states == {1: "INACTIVE", 2: "ACTIVE", 3: "INACTIVE"}
-            assert (
-                db.query(DataAccessPolicyVersion)
-                .filter(
-                    DataAccessPolicyVersion.policy_key == "retry.rollback",
-                    DataAccessPolicyVersion.status == "ACTIVE",
-                )
-                .count()
-                == 1
-            )
-            assert (
-                db.query(AuditEvent)
-                .filter(AuditEvent.action == "DATA_ACCESS_POLICY_ROLLED_BACK")
-                .count()
-                == 1
-            )
-
-        with factory() as db:
-            recovered = data_access_policies.rollback_policy(
+            rolled_back = data_access_policies.rollback_policy(
                 "retry.rollback",
                 data_access_policies.RollbackPolicyRequest(target_version=2),
                 db,
                 TEST_SETTINGS,
                 admin_actor(),
             )
-        assert recovered.version.id == UUID(version_ids[2])
+        assert rolled_back.version.id == UUID(version_ids[2])
+        assert rolled_back.dispatched is False
+
+        with factory() as db:
+            retried = data_access_policies.rollback_policy(
+                "retry.rollback",
+                data_access_policies.RollbackPolicyRequest(target_version=2),
+                db,
+                TEST_SETTINGS,
+                admin_actor(),
+            )
+        assert retried.version.id == UUID(version_ids[2])
+        assert retried.dispatched is False
 
         with factory() as db:
             states = {
@@ -444,15 +361,15 @@ def test_rollback_broker_failure_recovery_targets_explicit_version_without_walkb
                 .all()
             }
             assert states == {1: "INACTIVE", 2: "ACTIVE", 3: "INACTIVE"}
-            assert (
-                db.query(DataAccessPolicyVersion)
-                .filter(
-                    DataAccessPolicyVersion.policy_key == "retry.rollback",
-                    DataAccessPolicyVersion.status == "ACTIVE",
-                )
-                .count()
-                == 1
-            )
+            events = db.query(EventOutbox).order_by(EventOutbox.created_at.asc()).all()
+            assert [event.event_type for event in events] == [
+                "policy.version.activated",
+                "policy.version.activated",
+                "policy.version.activated",
+                "policy.version.rolled_back",
+            ]
+            assert events[-1].payload["policy_version_id"] == version_ids[2]
+            assert all(event.status == "PENDING" for event in events)
             assert (
                 db.query(AuditEvent)
                 .filter(AuditEvent.action == "DATA_ACCESS_POLICY_ROLLED_BACK")
@@ -466,18 +383,6 @@ def test_rollback_broker_failure_recovery_targets_explicit_version_without_walkb
                 == 1
             )
 
-        assert published == [
-            version_ids[1],
-            version_ids[2],
-            version_ids[3],
-            version_ids[2],
-            version_ids[2],
-        ]
-        delay.assert_called_with(
-            policy_version_id=version_ids[2],
-            correlation_id=None,
-        )
-
         with pytest.raises(PydanticValidationError):
             data_access_policies.RollbackPolicyRequest()
 
@@ -487,7 +392,6 @@ def test_rollback_broker_failure_recovery_targets_explicit_version_without_walkb
 def test_ranger_subject_validation_occurs_outside_authoritative_write_tx() -> None:
     factory, engine = build_test_db()
     holder = {}
-
     ranger = create_autospec(RangerClient, instance=True)
 
     def user_exists(_name: str) -> bool:
@@ -500,7 +404,7 @@ def test_ranger_subject_validation_occurs_outside_authoritative_write_tx() -> No
         data_access_policies,
         "build_resource_ranger_client",
         return_value=ranger,
-    ), patch.object(data_access_policies.sync_policy_to_ranger, "delay"):
+    ):
         with factory() as db:
             holder["db"] = db
             created = data_access_policies.create_policy_version(
@@ -521,5 +425,10 @@ def test_ranger_subject_validation_occurs_outside_authoritative_write_tx() -> No
                 admin_actor(),
             )
             assert activated.version.status == "ACTIVE"
+            assert activated.dispatched is False
+
+    with factory() as db:
+        assert db.query(EventOutbox).count() == 1
 
     Base.metadata.drop_all(engine)
+
