@@ -109,7 +109,12 @@ class OpenMetadataClient:
         }
         return self._request("POST", "/v1/dataQuality/testCases", json=body)
 
-    def get_test_case_by_name(self, fqn: str) -> dict | None:
+    def get_test_case_by_name(
+        self,
+        fqn: str,
+        *,
+        fields: str = "testSuite,testDefinition",
+    ) -> dict | None:
         """Deterministic lookup by name/FQN, used for crash-recovery
         reconciliation (I1) -- does not raise on 404, returns None instead,
         since "not found" is an expected outcome during recovery.
@@ -119,9 +124,46 @@ class OpenMetadataClient:
             return self._request(
                 "GET",
                 f"/v1/dataQuality/testCases/name/{encoded}",
+                params={"fields": fields},
             )
         except NotFoundError:
             return None
+
+    def find_test_case_by_entity_and_name(
+        self,
+        *,
+        entity_fqn: str,
+        name: str,
+    ) -> dict | None:
+        """Find one TestCase using OM 2.0.2's entityFQN list filter.
+
+        This avoids reconstructing OpenMetadata FQN quoting rules during
+        crash recovery. The deterministic TestCase name is the idempotency key.
+        """
+        response = self._request(
+            "GET",
+            "/v1/dataQuality/testCases",
+            params={
+                "entityFQN": entity_fqn,
+                "includeAllTests": "true",
+                "fields": "testSuite,testDefinition",
+                "limit": 1000,
+            },
+        )
+        matches = [
+            item
+            for item in response.get("data", []) or []
+            if isinstance(item, dict) and str(item.get("name") or "") == name
+        ]
+        if not matches:
+            return None
+        if len(matches) > 1:
+            raise ExternalSystemError(
+                f"OpenMetadata returned duplicate TestCases named {name!r} for {entity_fqn!r}",
+                system="openmetadata",
+                retryable=False,
+            )
+        return matches[0]
 
     def get_task(self, task_id: str) -> dict:
         """GET /api/v1/tasks/{id} -- the unified OM 2.0.2 Task entity, NOT
