@@ -4,9 +4,10 @@ from __future__ import annotations
 import logging
 
 from app.celery_app import app
+from app.clients.dq_runner import DQRunnerClient
 from app.clients.openmetadata import OpenMetadataClient
 from app.core.config import get_settings
-from app.core.errors import ExternalSystemError, ValidationError
+from app.core.errors import ConflictError, ExternalSystemError, ValidationError
 from app.db.session import SessionLocal
 from app.repositories.testcase_registry import TestCaseRegistryRepository
 from app.services.dq_service import DQService
@@ -101,6 +102,132 @@ def materialize_approved_test_case(self, *, registry_id: str) -> dict:
                 countdown=min(300, 2 ** (self.request.retries + 1)),
             )
         finally:
+            om_client.close()
+
+
+@app.task(
+    name="app.tasks.dq.run_executable_test_case",
+    bind=True,
+    max_retries=3,
+)
+def run_executable_test_case(
+    self,
+    *,
+    registry_id: str,
+    run_id: str,
+) -> dict:
+    """Run one generation-fenced EXECUTABLE TestCase through metadata test.
+
+    On retry, reconcile the latest OM testCaseResult against the original
+    run_started_at before triggering the external workflow again.
+    """
+    settings = get_settings()
+    om_client = _execution_om_client(settings)
+    runner = DQRunnerClient(
+        base_url=settings.dq_runner_url,
+        timeout=settings.dq_runner_timeout_seconds,
+    )
+
+    with SessionLocal() as session:
+        service = DQService(session, settings, om_client=om_client)
+        try:
+            state = service.mark_run_started(
+                registry_id=registry_id,
+                run_id=run_id,
+            )
+            if state.get("run_status") == "COMPLETED":
+                return state
+
+            recovered = service.latest_result_for_active_run(
+                registry_id=registry_id,
+                run_id=run_id,
+            )
+            if recovered is not None:
+                return service.complete_run(
+                    registry_id=registry_id,
+                    run_id=run_id,
+                    result=recovered,
+                )
+
+            state = service.get(registry_id=registry_id)
+            table_fqn = str(
+                service.registry.get(service._uuid(registry_id)).target_entity_fqn
+            )
+            test_suite_fqn = str(state.get("om_test_suite_fqn") or "")
+            test_case_name = str(state.get("natural_key_hash") or "")
+            if not table_fqn or not test_suite_fqn or not test_case_name:
+                raise ValidationError(
+                    "EXECUTABLE DQ state is missing table, suite, or TestCase identity"
+                )
+
+            runner.run_test_case(
+                table_fqn=table_fqn,
+                test_suite_fqn=test_suite_fqn,
+                test_case_name=test_case_name,
+            )
+
+            observed = service.latest_result_for_active_run(
+                registry_id=registry_id,
+                run_id=run_id,
+            )
+            if observed is None:
+                raise ExternalSystemError(
+                    "DQ runner completed but OpenMetadata has no result for this run",
+                    system="openmetadata",
+                    retryable=True,
+                )
+
+            return service.complete_run(
+                registry_id=registry_id,
+                run_id=run_id,
+                result=observed,
+            )
+
+        except ConflictError as exc:
+            session.rollback()
+            return {
+                "id": registry_id,
+                "run_id": run_id,
+                "status": "SUPERSEDED",
+                "error": exc.message,
+            }
+        except ValidationError as exc:
+            session.rollback()
+            try:
+                return service.fail_run(
+                    registry_id=registry_id,
+                    run_id=run_id,
+                    error=exc.message,
+                )
+            except ConflictError:
+                return {
+                    "id": registry_id,
+                    "run_id": run_id,
+                    "status": "SUPERSEDED",
+                    "error": exc.message,
+                }
+        except ExternalSystemError as exc:
+            session.rollback()
+            if exc.retryable and self.request.retries < 3:
+                raise self.retry(
+                    exc=exc,
+                    countdown=min(300, 2 ** (self.request.retries + 1)),
+                )
+            try:
+                return service.fail_run(
+                    registry_id=registry_id,
+                    run_id=run_id,
+                    error=exc.message,
+                )
+            except ConflictError:
+                return {
+                    "id": registry_id,
+                    "run_id": run_id,
+                    "status": "SUPERSEDED",
+                    "error": exc.message,
+                }
+        finally:
+            runner.close()
             om_client.close()
 
 
