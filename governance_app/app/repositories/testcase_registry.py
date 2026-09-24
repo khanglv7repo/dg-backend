@@ -1,7 +1,4 @@
-"""Repository for I1 (race/crash-recovery coordination) around Agent
-DIRECT-CREATE DQ TestCase writes. NOT a source of truth for TestCase
-existence -- OpenMetadata is (docs/13_IMPLEMENTATION_SPEC.md section 3).
-"""
+"""Backend DQ lifecycle and OM materialization coordination repository."""
 from __future__ import annotations
 
 import uuid
@@ -76,38 +73,11 @@ class TestCaseRegistryRepository:
                 return existing, False
             raise
 
-    def confirm(self, record_id, *, om_testcase_id: str) -> None:
-        record = self.session.get(TestCaseRegistry, record_id)
-        if record:
-            record.reservation_state = "CONFIRMED"
-            record.om_testcase_id = om_testcase_id
-            record.confirmed_at = utcnow()
-            self.session.flush()
-
     def mark_failed(self, record_id) -> None:
         record = self.session.get(TestCaseRegistry, record_id)
         if record:
             record.reservation_state = "FAILED"
             self.session.flush()
-
-    def retry_after_failure(self, record_id, *, worker_id: str) -> TestCaseRegistry | None:
-        """Re-arm a FAILED row for a new attempt (I1: a transient OM error --
-        e.g. token expiry, network blip -- must not permanently block this
-        natural_key_hash forever). Found live during TASK-08's audit: without
-        this, a single FAILED write attempt returns 409 CONFLICT for every
-        future retry of the exact same logical request, with no way back.
-        Re-reserves under the retrying worker_id and clears any stale
-        om_testcase_id from the failed attempt."""
-        record = self.session.get(TestCaseRegistry, record_id)
-        if record is None or record.reservation_state != "FAILED":
-            return None
-        record.reservation_state = "RESERVED"
-        record.worker_id = worker_id
-        record.reserved_at = utcnow()
-        record.om_testcase_id = None
-        record.confirmed_at = None
-        self.session.flush()
-        return record
 
     def approved_materialization_candidates(self) -> list[TestCaseRegistry]:
         return list(
@@ -131,14 +101,6 @@ class TestCaseRegistryRepository:
             .all()
             if row.reserved_at.timestamp() < cutoff
         ]
-
-    @staticmethod
-    def raise_conflict_if_reserved_by_other(record: TestCaseRegistry) -> None:
-        if record.reservation_state == "RESERVED":
-            raise ConflictError(
-                f"natural_key_hash {record.natural_key_hash!r} is already reserved "
-                f"by worker {record.worker_id!r}"
-            )
 
     def approve(self, record_id, *, actor_id: str) -> TestCaseRegistry:
         """Explicit human/operator STAGED -> APPROVED transition.
@@ -165,6 +127,7 @@ class TestCaseRegistryRepository:
         record.lifecycle_state = "APPROVED"
         if record.reservation_state == "NOT_STARTED":
             record.reservation_state = "RESERVED"
+            record.reserved_at = utcnow()
         record.approved_at = utcnow()
         record.approved_by = actor_id
         self.session.flush()
