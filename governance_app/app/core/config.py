@@ -174,6 +174,24 @@ class Settings(BaseSettings):
 
     trusted_identity_headers: bool = True
 
+    # R8 reconciliation/drift threshold, derived from D1 POC evidence
+    # (planning/evidence/TASK-06/): min=20.3s, median=32.2s, max=33.0s (n=10).
+    # eventual_consistency_window = observed_max * 1.5, refine with production
+    # p95 once >=30-50 real samples exist (docs/13_IMPLEMENTATION_SPEC.md section 7).
+    eventual_consistency_window_seconds: float = Field(default=50.0, gt=0)
+
+    # R8 Outbox dispatcher poll interval.
+    outbox_dispatch_poll_seconds: float = Field(default=5.0, gt=0)
+    outbox_max_dispatch_attempts: int = Field(default=5, ge=1)
+
+    # R8 DQ TestCase creation registry (I1 coordination/crash-recovery).
+    dq_registry_reservation_ttl_seconds: int = Field(default=120, ge=1)
+
+    # I11 kill switches: independent, per-path feature flags. Both default OFF
+    # per docs/13_IMPLEMENTATION_SPEC.md section 9 rollout sequence.
+    agent_write_to_om_enabled: bool = False
+    auto_apply_tag_enabled: bool = False
+
     @field_validator("api_prefix", "mcp_path")
     @classmethod
     def validate_path_prefix(

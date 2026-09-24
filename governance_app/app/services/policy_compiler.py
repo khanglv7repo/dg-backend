@@ -17,9 +17,9 @@ RANGER_POLICY_TYPE_ACCESS = 0
 RANGER_POLICY_TYPE_MASK = 1
 RANGER_POLICY_TYPE_ROW_FILTER = 2
 RANGER_MASK_TYPES = {
-    # Apache Ranger 2.8.0 Trino service definition:
-    # logical MASK -> native MASK (Redact).
-    LogicalMaskIntent.MASK: "MASK",
+    # Apache Ranger Trino service definition:
+    # logical MASK -> native MASK_HASH.
+    LogicalMaskIntent.MASK: "MASK_HASH",
 }
 
 
@@ -60,7 +60,7 @@ class PolicyCompiler:
             )
 
         for column, intent in sorted(logical_policy.masks.items()):
-            projection_key = f"mask:{hashlib.sha256(column.encode()).hexdigest()[:12]}"
+            projection_key = f"hash:{hashlib.sha256(column.encode()).hexdigest()[:12]}"
             document = self._compile_mask(
                 policy_key=policy_key,
                 logical_policy=logical_policy,
@@ -178,14 +178,14 @@ class PolicyCompiler:
             policy_key=policy_key,
             name=self._policy_name(
                 policy_key,
-                f"mask-{self._slug(column, 24)}-{column_hash}",
+                f"hash-{self._slug(column, 24)}-{column_hash}",
             ),
             policy_type=RANGER_POLICY_TYPE_MASK,
             resources={
                 **self._table_resources(logical_policy),
                 "column": self._resource(column),
             },
-            description=f"Data-access projection for {policy_key} [MASK:{column}]",
+            description=f"Data-access projection for {policy_key} [MASK_HASH:{column}]",
         )
         document["dataMaskPolicyItems"] = [
             {

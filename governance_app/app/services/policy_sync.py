@@ -11,9 +11,7 @@ from app.clients.ranger import RangerClient
 from app.clients.ranger_tags import RangerTagStoreClient
 from app.core.config import Settings
 from app.core.errors import ConfigurationError
-from app.models.enums import JobType
 from app.repositories.audit import AuditRepository
-from app.repositories.jobs import JobRepository
 from app.repositories.policies import PolicyRepository
 
 
@@ -40,17 +38,21 @@ class PolicySyncCommandService:
             },
             sort_keys=True,
         )
+        # `fingerprint` retained for audit correlation; Celery dispatch
+        # replaces the legacy JobRepository/GovernanceJob queue
+        # (docs/13_IMPLEMENTATION_SPEC.md section 9).
         fingerprint = hashlib.sha256(logical.encode()).hexdigest()
-        job = JobRepository(self.session).enqueue(
-            job_type=JobType.SYNC_RANGER_POLICIES,
-            idempotency_key=f"sync-ranger-policies:{fingerprint}",
+
+        from app.services.intake import _DispatchedTaskRef
+        from app.tasks.policy_sync import sync_legacy_ranger_policy_catalog
+
+        task = sync_legacy_ranger_policy_catalog.delay(
             payload={
                 "policy_ids": normalized_ids,
                 "correlation_id": correlation_id,
-            },
-            correlation_id=correlation_id,
-            max_attempts=5,
+            }
         )
+        job = _DispatchedTaskRef(task)
         self.audit.record(
             actor_id=actor_id,
             actor_name=actor_name,

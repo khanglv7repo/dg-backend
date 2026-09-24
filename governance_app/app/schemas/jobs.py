@@ -27,3 +27,16 @@ class JobResponse(ORMModel):
 
 class JobRetryRequest(BaseModel):
     reason: str = Field(min_length=3, max_length=1000)
+
+
+class CeleryTaskStatusResponse(BaseModel):
+    """Status response for Celery tasks dispatched via .delay() after the
+    GovernanceJob→Celery migration (docs/13_IMPLEMENTATION_SPEC.md section 9).
+    Returned by GET /api/v1/jobs/{task_id} when the ID is not a legacy DB row.
+    """
+
+    id: UUID
+    source: str = "celery_task"
+    status: str  # PENDING | STARTED | RETRY | SUCCESS | FAILURE
+    info: str | None = None
+

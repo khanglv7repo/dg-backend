@@ -47,13 +47,32 @@ app.conf.update(
             "task": "app.tasks.recovery.retry_unfinished_workflows",
             "schedule": 300.0,
         },
+        "dispatch-pending-outbox-events": {
+            "task": "app.tasks.outbox.dispatch_pending_outbox_events",
+            "schedule": float(os.getenv("OUTBOX_DISPATCH_POLL_SECONDS", "5")),
+        },
+        "recover-testcase-registry": {
+            "task": "app.tasks.dq.recover_testcase_registry",
+            "schedule": float(os.getenv("DQ_REGISTRY_TTL_SECONDS", "120")),
+        },
+        "verify-trino-policy-enforcement": {
+            # Runs at 2 × eventual_consistency_window (D1: max=33.0s × 1.5 = 50s,
+            # so 2 × 50s = 100s) to avoid racing normal Ranger→Trino propagation
+            # delay on the first poll after a fresh sync_policy_to_ranger run.
+            "task": "app.tasks.policy_sync.verify_trino_policy_enforcement",
+            "schedule": float(os.getenv("TRINO_VERIFICATION_INTERVAL_SECONDS", "100")),
+        },
     },
 )
 
 app.conf.imports = (
     "app.tasks.classification",
+    "app.tasks.discovery",
+    "app.tasks.dq",
     "app.tasks.ingestion",
+    "app.tasks.outbox",
     "app.tasks.policy_sync",
     "app.tasks.recovery",
     "app.tasks.tag_sync",
+    "app.tasks.task_resolution",
 )

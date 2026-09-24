@@ -6,6 +6,7 @@ from app.api.routes import (
     classification_runs,
     classifications,
     data_access_policies,
+    dq,
     events,
     health,
     jobs,
@@ -66,4 +67,9 @@ api_router.include_router(
     jobs.router,
     prefix="/jobs",
     tags=["jobs"],
+)
+api_router.include_router(
+    dq.router,
+    prefix="/dq",
+    tags=["dq"],
 )

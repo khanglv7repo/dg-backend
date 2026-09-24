@@ -1,16 +1,14 @@
 from __future__ import annotations
 
 import hashlib
-import json
 
 from sqlalchemy.orm import Session
 
 from app.clients.openmetadata import OpenMetadataClient
 from app.core.errors import ExternalSystemError
-from app.models.enums import ClassificationSource, JobType
+from app.models.enums import ClassificationSource
 from app.repositories.audit import AuditRepository
 from app.repositories.classification import ClassificationRunRepository
-from app.repositories.jobs import JobRepository
 
 
 class OpenMetadataSuggestionService:
@@ -171,33 +169,21 @@ class ConfirmedTagApplicationService:
             field_tags=field_tags,
         )
 
-        logical = json.dumps(
-            {
-                "entity_type": entity_type,
-                "entity_fqn": entity_fqn,
-                "entity_tags": sorted(set(entity_tags)),
-                "field_tags": {
-                    key: sorted(set(values))
-                    for key, values in sorted(field_tags.items())
-                },
-                "classification_run_id": classification_run_id,
-                "purpose": "sync-ranger-tag-assignments",
-            },
-            sort_keys=True,
-        )
-        key = hashlib.sha256(logical.encode()).hexdigest()
-        job = JobRepository(self.session).enqueue(
-            job_type=JobType.SYNC_RANGER_TAGS,
-            idempotency_key=f"sync-ranger-tags:{key}",
-            payload={
-                "entity_type": entity_type,
-                "entity_fqn": entity_fqn,
-                "classification_run_id": classification_run_id,
-                "correlation_id": correlation_id,
-            },
+        # Celery dispatch replaces the legacy JobRepository/GovernanceJob
+        # queue (docs/13_IMPLEMENTATION_SPEC.md section 9 job engine
+        # decision) -- no idempotency_key/max_attempts wrapper is needed
+        # here since sync_tags_to_ranger.delay itself re-reads the latest
+        # authoritative Confirmed tag state on execution (see its own
+        # docstring), so a duplicate dispatch is naturally idempotent.
+        from app.tasks.tag_sync import sync_tags_to_ranger
+
+        task = sync_tags_to_ranger.delay(
+            entity_type=entity_type,
+            entity_fqn=entity_fqn,
             correlation_id=correlation_id,
-            max_attempts=5,
         )
+        task_id = str(task.id) if getattr(task, "id", None) else None
+
         self.audit.record(
             actor_id=f"bot:{self.bot_name}",
             actor_name=self.bot_name,
@@ -209,12 +195,12 @@ class ConfirmedTagApplicationService:
                 "classification_run_id": classification_run_id,
                 "entity_tags": entity_tags,
                 "field_tags": field_tags,
-                "next_job_id": str(job.id),
+                "next_task_id": task_id,
                 "snapshot_source": "openmetadata-readback",
             },
         )
         return {
-            "tag_sync_job_id": str(job.id),
+            "tag_sync_job_id": task_id,
             # Compatibility key for callers written against the previous patch.
-            "reconcile_job_id": str(job.id),
+            "reconcile_job_id": task_id,
         }

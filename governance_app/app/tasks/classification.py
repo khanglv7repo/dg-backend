@@ -320,3 +320,88 @@ def ai_classify_entity(
         "execution_id": execution_id,
         "generation": generation,
     }
+
+
+@app.task(
+    name="app.tasks.classification.classify_asset",
+    bind=True,
+    max_retries=3,
+)
+def classify_asset(self, *, payload: dict[str, Any]) -> dict[str, Any]:
+    """Celery replacement for the legacy JobType.CLASSIFY_ASSET
+    JobRepository dispatch (docs/13_IMPLEMENTATION_SPEC.md section 9).
+    Named distinctly from classify_entity above: that task runs a
+    separate, OM-fetch-driven pipeline
+    (ClassificationExecutionRepository-based); this one runs
+    ClassificationService.classify() against an already-supplied
+    MetadataEventRequest payload -- the two are not interchangeable, both
+    pre-existed this task's changes, and reconciling them into one pipeline
+    is out of TASK-08's scope (not a manifest row).
+    """
+    from app.jobs.handlers import handle_classify
+
+    settings = get_settings()
+    session = SessionLocal()
+    try:
+        return handle_classify(session, settings, payload)
+    finally:
+        session.close()
+
+
+@app.task(
+    name="app.tasks.classification.classify_asset_from_openmetadata",
+    bind=True,
+    max_retries=3,
+)
+def classify_asset_from_openmetadata(self, *, payload: dict[str, Any]) -> dict[str, Any]:
+    """Celery replacement for the legacy JobType.CLASSIFY_ASSET_FROM_OM
+    JobRepository dispatch (docs/13_IMPLEMENTATION_SPEC.md section 9).
+    """
+    from app.jobs.handlers import handle_classify_from_openmetadata
+
+    settings = get_settings()
+    session = SessionLocal()
+    try:
+        return handle_classify_from_openmetadata(session, settings, payload)
+    finally:
+        session.close()
+
+
+@app.task(
+    name="app.tasks.classification.create_om_suggestions",
+    bind=True,
+    max_retries=3,
+)
+def create_om_suggestions(self, *, payload: dict[str, Any]) -> dict[str, Any]:
+    """Celery replacement for the legacy JobType.CREATE_OM_SUGGESTIONS
+    JobRepository dispatch (docs/13_IMPLEMENTATION_SPEC.md section 9 job
+    engine decision). Reuses the existing handler logic unchanged.
+    """
+    from app.jobs.handlers import handle_create_om_suggestions
+
+    settings = get_settings()
+    session = SessionLocal()
+    try:
+        return handle_create_om_suggestions(session, settings, payload)
+    finally:
+        session.close()
+
+
+@app.task(
+    name="app.tasks.classification.apply_confirmed_tags",
+    bind=True,
+    max_retries=3,
+)
+def apply_confirmed_tags(self, *, payload: dict[str, Any]) -> dict[str, Any]:
+    """Celery replacement for the legacy JobType.APPLY_CONFIRMED_TAGS
+    JobRepository dispatch (docs/13_IMPLEMENTATION_SPEC.md section 9 job
+    engine decision). Reuses the existing handler logic unchanged.
+    """
+    from app.jobs.handlers import handle_apply_confirmed_tags
+
+    settings = get_settings()
+    session = SessionLocal()
+    try:
+        return handle_apply_confirmed_tags(session, settings, payload)
+    finally:
+        session.close()

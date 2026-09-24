@@ -8,9 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.clients.openmetadata import OpenMetadataClient
 from app.core.config import Settings
-from app.models.enums import JobType
 from app.repositories.audit import AuditRepository
-from app.repositories.jobs import JobRepository
 from app.repositories.watermark import IntegrationWatermarkRepository
 from app.schemas.events import MetadataEventRequest, MetadataField
 from app.services.classification_rule_catalog import (
@@ -33,7 +31,6 @@ class AssetDiscoveryService:
         self.settings = settings
         self.om_client = om_client
         self.watermark_repo = IntegrationWatermarkRepository(session)
-        self.jobs = JobRepository(session)
         self.audit = AuditRepository(session)
 
     def discover(
@@ -149,22 +146,17 @@ class AssetDiscoveryService:
                     correlation_id=correlation_id,
                 )
 
-                idempotency_key = (
-                    f"classify:{entity_fqn}:{version}:"
-                    f"{engine.configuration_version}"
-                )
+                # Celery dispatch replaces the legacy JobRepository/
+                # GovernanceJob queue (docs/13_IMPLEMENTATION_SPEC.md
+                # section 9). Per-entity idempotency across repeated
+                # discovery runs is handled downstream by
+                # ClassificationExecutionRepository.get_or_create_next_generation
+                # (keyed on event_id/entity_fqn), not by a dispatch-time key.
+                from app.tasks.classification import classify_asset
 
-                job = self.jobs.enqueue(
-                    job_type=JobType.CLASSIFY_ASSET,
-                    idempotency_key=idempotency_key,
-                    payload=req.model_dump(
-                        mode="json"
-                    ),
-                    correlation_id=correlation_id,
-                    max_attempts=3,
-                )
+                task = classify_asset.delay(payload=req.model_dump(mode="json"))
                 enqueued_jobs.append(
-                    str(job.id)
+                    str(task.id) if getattr(task, "id", None) else ""
                 )
 
             self.watermark_repo.set(

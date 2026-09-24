@@ -84,6 +84,54 @@ class OpenMetadataClient:
             raise NotFoundError(f"OpenMetadata entity {entity_type}:{fqn} was not found")
         return response
 
+    def create_test_case(
+        self,
+        *,
+        name: str,
+        entity_link: str,
+        test_definition_fqn: str,
+        parameter_values: dict[str, Any],
+    ) -> dict:
+        """POST /api/v1/dataQuality/testCases using the observed REST shape
+        (planning/evidence/TASK-04/b1_create_test_case_response.json), NOT
+        the MCP tool's fqn+columnName shape -- the two differ
+        (docs/13_IMPLEMENTATION_SPEC.md section 5). No explicit testSuite is
+        passed: OM auto-attaches a `basic` (logical, non-executable) suite,
+        which is the confirmed B2 STAGED mechanism.
+        """
+        body = {
+            "name": name,
+            "entityLink": entity_link,
+            "testDefinition": test_definition_fqn,
+            "parameterValues": [
+                {"name": key, "value": value} for key, value in parameter_values.items()
+            ],
+        }
+        return self._request("POST", "/v1/dataQuality/testCases", json=body)
+
+    def get_test_case_by_name(self, fqn: str) -> dict | None:
+        """Deterministic lookup by name/FQN, used for crash-recovery
+        reconciliation (I1) -- does not raise on 404, returns None instead,
+        since "not found" is an expected outcome during recovery.
+        """
+        encoded = quote(fqn, safe="")
+        try:
+            return self._request(
+                "GET",
+                f"/v1/dataQuality/testCases/name/{encoded}",
+            )
+        except NotFoundError:
+            return None
+
+    def get_task(self, task_id: str) -> dict:
+        """GET /api/v1/tasks/{id} -- the unified OM 2.0.2 Task entity, NOT
+        the legacy /v1/feed/tasks threads. Always re-fetched rather than
+        trusted from a ChangeEvent payload, since task.entityUpdated events
+        never include the status field itself
+        (docs/13_IMPLEMENTATION_SPEC.md section 5, Hard Invariant #20).
+        """
+        return self._request("GET", f"/v1/tasks/{task_id}")
+
     def get_tag(self, tag_fqn: str) -> dict:
         """Return the taxonomy tag identified by its OpenMetadata FQN."""
         return self._request(

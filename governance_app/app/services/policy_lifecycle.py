@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.clients.ranger import RangerClient
 from app.core.config import Settings
 from app.core.errors import ConfigurationError, ExternalSystemError, NotFoundError
+from app.repositories.event_outbox import EventOutboxRepository
 from app.services.data_access_policy import DataAccessPolicyService
 from app.tasks.policy_sync import sync_policy_to_ranger
 
@@ -81,6 +82,11 @@ class PolicyLifecycleService:
         ).validate_activation_subjects(target)
 
         # TX2 contains only the authoritative desired-state transition.
+        # EventOutboxRepository.enqueue() is called inside the SAME begin()
+        # block so the outbox row commits atomically with the authority write.
+        # If Celery is unavailable at dispatch time the dispatcher (Step 3 of the
+        # transactional outbox pattern: app/tasks/outbox.py) will drain the row
+        # on its next poll. Hard Invariant: both happen or neither does.
         with self.session.begin():
             selected, changed = DataAccessPolicyService(
                 self.session,
@@ -91,8 +97,20 @@ class PolicyLifecycleService:
                 actor_name=actor_name,
                 correlation_id=correlation_id,
             )
+            version_id = str(selected.id)
+            EventOutboxRepository(self.session).enqueue(
+                aggregate_type="data_access_policy",
+                aggregate_id=str(selected.policy_key),
+                event_type="policy.version.activated",
+                payload={
+                    "policy_key": str(selected.policy_key),
+                    "policy_version_id": version_id,
+                    "version": int(selected.version),
+                    "actor_id": actor_id,
+                    "correlation_id": correlation_id,
+                },
+            )
 
-        version_id = str(selected.id)
         task_id = self.dispatcher(version_id, correlation_id)
         return PolicyLifecycleResult(
             version=selected,
@@ -137,8 +155,21 @@ class PolicyLifecycleService:
                 correlation_id=correlation_id,
                 validation=validation,
             )
+            version_id = str(selected.id)
+            # Enqueue outbox row atomically with the rollback authority write.
+            EventOutboxRepository(self.session).enqueue(
+                aggregate_type="data_access_policy",
+                aggregate_id=str(selected.policy_key),
+                event_type="policy.version.rolled_back",
+                payload={
+                    "policy_key": str(selected.policy_key),
+                    "policy_version_id": version_id,
+                    "version": int(selected.version),
+                    "actor_id": actor_id,
+                    "correlation_id": correlation_id,
+                },
+            )
 
-        version_id = str(selected.id)
         task_id = self.dispatcher(version_id, correlation_id)
         return PolicyLifecycleResult(
             version=selected,

@@ -2,13 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import uuid
 
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings
-from app.models.enums import JobType
 from app.repositories.audit import AuditRepository
-from app.repositories.jobs import JobRepository
 from app.schemas.events import (
     ConfirmedTagEventRequest,
     MetadataEventRequest,
@@ -16,6 +15,28 @@ from app.schemas.events import (
 from app.services.classification_rule_catalog import (
     ClassificationRuleCatalogService,
 )
+
+
+class _DispatchedTaskRef:
+    """Minimal shim exposing (id, status) matching the legacy
+    GovernanceJob-returning contract that app/api/routes/events.py's
+    AcceptedResponse still expects, backed by a real Celery AsyncResult
+    (docs/13_IMPLEMENTATION_SPEC.md section 9 job engine decision).
+    """
+
+    def __init__(self, task) -> None:
+        self._task = task
+        # Celery task ids are UUID-format strings; the API's response model
+        # requires a real uuid.UUID -- always true in practice, but guard
+        # rather than assume.
+        self.id = uuid.UUID(str(task.id)) if getattr(task, "id", None) else uuid.uuid4()
+
+    @property
+    def status(self) -> str:
+        try:
+            return str(self._task.status)
+        except Exception:
+            return "QUEUED"
 
 
 class IntakeService:
@@ -42,25 +63,17 @@ class IntakeService:
             f"{request.entity_fqn}|"
             f"{engine.configuration_version}"
         )
+        # `fingerprint` retained for audit correlation; Celery dispatch
+        # replaces the legacy JobRepository/GovernanceJob queue
+        # (docs/13_IMPLEMENTATION_SPEC.md section 9 job engine decision).
         fingerprint = hashlib.sha256(
             logical.encode()
         ).hexdigest()
 
-        job = JobRepository(
-            self.session
-        ).enqueue(
-            job_type=JobType.CLASSIFY_ASSET,
-            idempotency_key=(
-                f"classify:{fingerprint}"
-            ),
-            payload=request.model_dump(
-                mode="json"
-            ),
-            correlation_id=(
-                request.correlation_id
-            ),
-            max_attempts=3,
-        )
+        from app.tasks.classification import classify_asset
+
+        task = classify_asset.delay(payload=request.model_dump(mode="json"))
+        job = _DispatchedTaskRef(task)
 
         AuditRepository(
             self.session
@@ -82,6 +95,8 @@ class IntakeService:
                     engine.configuration_version,
                 "classification_rule_sha256":
                     engine.configuration_sha256,
+                "idempotency_fingerprint":
+                    fingerprint,
             },
         )
         return job
@@ -116,28 +131,14 @@ class IntakeService:
             logical.encode()
         ).hexdigest()
 
-        job = JobRepository(
-            self.session
-        ).enqueue(
-            job_type=JobType.SYNC_RANGER_TAGS,
-            idempotency_key=(
-                f"confirmed-tags:{fingerprint}"
-            ),
-            payload={
-                "entity_type":
-                    request.entity_type,
-                "entity_fqn":
-                    request.entity_fqn,
-                "classification_run_id":
-                    None,
-                "correlation_id":
-                    request.correlation_id,
-            },
-            correlation_id=(
-                request.correlation_id
-            ),
-            max_attempts=5,
+        from app.tasks.tag_sync import sync_tags_to_ranger
+
+        task = sync_tags_to_ranger.delay(
+            entity_type=request.entity_type,
+            entity_fqn=request.entity_fqn,
+            correlation_id=request.correlation_id,
         )
+        job = _DispatchedTaskRef(task)
 
         AuditRepository(
             self.session

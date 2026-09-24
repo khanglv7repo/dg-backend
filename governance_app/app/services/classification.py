@@ -195,50 +195,41 @@ class ClassificationService:
         change = change_from_suggestions(
             result.suggestions
         )
-        job_type = (
-            JobType.APPLY_CONFIRMED_TAGS
-            if (
-                action
-                == ClassificationAction.AUTO_APPLY
-            )
-            else JobType.CREATE_OM_SUGGESTIONS
-        )
-        logical = hashlib.sha256(
-            f"{run.id}|{action.value}|{change}".encode()
-        ).hexdigest()
+        payload = {
+            **change,
+            "classification_run_id":
+                str(run.id),
+            "entity_type":
+                event.entity_type,
+            "entity_fqn":
+                event.entity_fqn,
+            "source_kind":
+                ClassificationSource.DETERMINISTIC.value,
+            "source_version":
+                result.rule_version,
+            "suggestions": [
+                item.model_dump(
+                    mode="json"
+                )
+                for item
+                in result.suggestions
+            ],
+            "correlation_id":
+                event.correlation_id,
+        }
 
-        job = JobRepository(
-            self.session
-        ).enqueue(
-            job_type=job_type,
-            idempotency_key=(
-                f"classification-action:{logical}"
-            ),
-            payload={
-                **change,
-                "classification_run_id":
-                    str(run.id),
-                "entity_type":
-                    event.entity_type,
-                "entity_fqn":
-                    event.entity_fqn,
-                "source_kind":
-                    ClassificationSource.DETERMINISTIC.value,
-                "source_version":
-                    result.rule_version,
-                "suggestions": [
-                    item.model_dump(
-                        mode="json"
-                    )
-                    for item
-                    in result.suggestions
-                ],
-                "correlation_id":
-                    event.correlation_id,
-            },
-            correlation_id=(
-                event.correlation_id
-            ),
+        # Celery dispatch replaces the legacy JobRepository/GovernanceJob
+        # queue (no process drains that queue in this deployment; see
+        # docs/13_IMPLEMENTATION_SPEC.md section 9 job engine decision).
+        from app.tasks.classification import (
+            apply_confirmed_tags,
+            create_om_suggestions,
+        )
+
+        task = (
+            apply_confirmed_tags.delay(payload=payload)
+            if action == ClassificationAction.AUTO_APPLY
+            else create_om_suggestions.delay(payload=payload)
         )
 
         return {
@@ -249,7 +240,7 @@ class ClassificationService:
             "run_id":
                 str(run.id),
             "job_id":
-                str(job.id),
+                str(task.id) if getattr(task, "id", None) else None,
         }
 
     def _select_action(
@@ -428,43 +419,34 @@ class AgentClassificationResultService:
         change = change_from_suggestions(
             request.suggestions
         )
-        key = hashlib.sha256(
-            f"{run.id}|om-suggestions|{change}".encode()
-        ).hexdigest()
+        payload = {
+            **change,
+            "classification_run_id":
+                str(run.id),
+            "entity_type":
+                request.entity_type,
+            "entity_fqn":
+                request.entity_fqn,
+            "source_kind":
+                ClassificationSource.AGENT.value,
+            "source_version":
+                source_version,
+            "suggestions": [
+                item.model_dump(
+                    mode="json"
+                )
+                for item
+                in request.suggestions
+            ],
+            "correlation_id":
+                request.correlation_id,
+        }
 
-        job = JobRepository(
-            self.session
-        ).enqueue(
-            job_type=JobType.CREATE_OM_SUGGESTIONS,
-            idempotency_key=(
-                f"agent-suggestions:{key}"
-            ),
-            payload={
-                **change,
-                "classification_run_id":
-                    str(run.id),
-                "entity_type":
-                    request.entity_type,
-                "entity_fqn":
-                    request.entity_fqn,
-                "source_kind":
-                    ClassificationSource.AGENT.value,
-                "source_version":
-                    source_version,
-                "suggestions": [
-                    item.model_dump(
-                        mode="json"
-                    )
-                    for item
-                    in request.suggestions
-                ],
-                "correlation_id":
-                    request.correlation_id,
-            },
-            correlation_id=(
-                request.correlation_id
-            ),
-        )
+        # Celery dispatch replaces the legacy JobRepository/GovernanceJob
+        # queue (see docs/13_IMPLEMENTATION_SPEC.md section 9).
+        from app.tasks.classification import create_om_suggestions
+
+        task = create_om_suggestions.delay(payload=payload)
 
         return {
             "action":
@@ -472,7 +454,7 @@ class AgentClassificationResultService:
             "run_id":
                 str(run.id),
             "job_id":
-                str(job.id),
+                str(task.id) if getattr(task, "id", None) else None,
         }
 
 

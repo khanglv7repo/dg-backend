@@ -1,4 +1,5 @@
 import pytest
+from unittest.mock import MagicMock, patch
 from sqlalchemy import select
 
 from app.core.config import Settings
@@ -6,9 +7,7 @@ from app.core.errors import ConfigurationError
 from app.models.audit import AuditEvent
 from app.models.enums import (
     ClassificationAction,
-    JobType,
 )
-from app.repositories.jobs import JobRepository
 from app.schemas.classification import TagSuggestion
 from app.schemas.events import (
     AgentClassificationEventRequest,
@@ -48,37 +47,26 @@ def test_agent_result_only_enqueues_openmetadata_suggestion(
     session,
     active_classification_rules,
 ) -> None:
-    settings = Settings(
-        agent_enabled=True
-    )
-    with session.begin():
-        result = (
-            AgentClassificationResultService(
-                session,
-                settings,
-            ).accept(request())
-        )
+    """After the GovernanceJob→Celery migration, AgentClassificationResultService
+    dispatches CREATE_OM_SUGGESTIONS via create_om_suggestions.delay() instead of
+    JobRepository.enqueue(). Verify the Celery task fires with AGENT source_kind.
+    """
+    settings = Settings(agent_enabled=True)
 
-    claimed = JobRepository(
-        session
-    ).claim_batch(
-        worker_id="test",
-        limit=10,
-    )
+    fake_async = MagicMock()
+    fake_async.id = "00000000-0000-0000-0000-000000000021"
 
-    assert (
-        result["action"]
-        == ClassificationAction.OPENMETADATA_SUGGESTION.value
-    )
-    assert len(claimed) == 1
-    assert (
-        claimed[0].job_type
-        == JobType.CREATE_OM_SUGGESTIONS.value
-    )
-    assert (
-        claimed[0].payload["source_kind"]
-        == "AGENT"
-    )
+    with patch(
+        "app.tasks.classification.create_om_suggestions.delay",
+        return_value=fake_async,
+    ) as mock_delay:
+        with session.begin():
+            result = AgentClassificationResultService(session, settings).accept(request())
+
+    assert result["action"] == ClassificationAction.OPENMETADATA_SUGGESTION.value
+    mock_delay.assert_called_once()
+    call_kwargs = mock_delay.call_args.kwargs
+    assert call_kwargs["payload"]["source_kind"] == "AGENT"
 
 
 def test_agent_result_rejects_tags_outside_allowlist(

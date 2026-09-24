@@ -67,8 +67,11 @@ def test_compiler_mask_is_separate_policy_type_1_and_one_per_column() -> None:
             {"type": "select", "isAllowed": True}
         ]
         assert document["dataMaskPolicyItems"][0]["dataMaskInfo"] == {
-            "dataMaskType": "MASK"
+            "dataMaskType": "MASK_HASH"
         }
+        assert projection.projection_key.startswith("hash:")
+        assert projection.ranger_policy_name.startswith("dg-r4-sales.customer-")
+        assert "-hash-" in projection.ranger_policy_name
         assert "policyItems" not in document
         assert "rowFilterPolicyItems" not in document
 

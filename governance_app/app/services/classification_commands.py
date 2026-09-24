@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import uuid
 
 from sqlalchemy.orm import Session
@@ -8,9 +7,7 @@ from sqlalchemy.orm import Session
 from app.clients.openmetadata import OpenMetadataClient
 from app.core.config import Settings
 from app.core.errors import ConfigurationError
-from app.models.enums import JobType
 from app.repositories.audit import AuditRepository
-from app.repositories.jobs import JobRepository
 from app.schemas.events import MetadataEventRequest, MetadataField
 from app.services.classification import ClassificationService
 
@@ -32,19 +29,20 @@ class ClassificationCommandService:
         if not self.settings.openmetadata_enabled:
             raise ConfigurationError("OpenMetadata integration is disabled")
         event_id = f"manual-classification:{uuid.uuid4()}"
-        fingerprint = hashlib.sha256(event_id.encode()).hexdigest()
-        job = JobRepository(self.session).enqueue(
-            job_type=JobType.CLASSIFY_ASSET_FROM_OM,
-            idempotency_key=f"classify-from-om:{fingerprint}",
+        # Celery dispatch replaces the legacy JobRepository/GovernanceJob
+        # queue (docs/13_IMPLEMENTATION_SPEC.md section 9).
+        from app.services.intake import _DispatchedTaskRef
+        from app.tasks.classification import classify_asset_from_openmetadata
+
+        task = classify_asset_from_openmetadata.delay(
             payload={
                 "event_id": event_id,
                 "entity_type": entity_type,
                 "entity_fqn": entity_fqn,
                 "correlation_id": correlation_id,
-            },
-            correlation_id=correlation_id,
-            max_attempts=3,
+            }
         )
+        job = _DispatchedTaskRef(task)
         AuditRepository(self.session).record(
             actor_id="system:classification-command",
             actor_name="Classification Command",

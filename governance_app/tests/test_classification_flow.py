@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+from unittest.mock import MagicMock, patch
+
 from app.core.config import Settings
 from app.models.enums import (
     ClassificationAction,
@@ -36,71 +40,50 @@ def test_trusted_exact_rule_enqueues_direct_confirmed_tag_application(
     session,
     active_classification_rules,
 ) -> None:
-    settings = Settings(
-        trusted_auto_apply_enabled=True
-    )
+    """After the GovernanceJob→Celery migration, ClassificationService dispatches
+    APPLY_CONFIRMED_TAGS via apply_confirmed_tags.delay() instead of
+    JobRepository.enqueue(). Verify the Celery task fires for a trusted exact match.
+    """
+    settings = Settings(trusted_auto_apply_enabled=True)
 
-    with session.begin():
-        result = ClassificationService(
-            session,
-            settings,
-        ).classify(
-            event("email", "evt-1")
-        )
+    fake_async = MagicMock()
+    fake_async.id = "00000000-0000-0000-0000-000000000011"
 
-    claimed = JobRepository(
-        session
-    ).claim_batch(
-        worker_id="test",
-        limit=10,
-    )
+    with patch(
+        "app.tasks.classification.apply_confirmed_tags.delay",
+        return_value=fake_async,
+    ) as mock_delay:
+        with session.begin():
+            result = ClassificationService(session, settings).classify(event("email", "evt-1"))
 
-    assert (
-        result["action"]
-        == ClassificationAction.AUTO_APPLY.value
-    )
-    assert len(claimed) == 1
-    assert (
-        claimed[0].job_type
-        == JobType.APPLY_CONFIRMED_TAGS.value
-    )
+    assert result["action"] == ClassificationAction.AUTO_APPLY.value
+    mock_delay.assert_called_once()
 
 
 def test_non_trusted_rule_enqueues_openmetadata_suggestion(
     session,
     active_classification_rules,
 ) -> None:
-    settings = Settings(
-        trusted_auto_apply_enabled=True
-    )
+    """After the GovernanceJob→Celery migration, ClassificationService dispatches
+    CREATE_OM_SUGGESTIONS via create_om_suggestions.delay() instead of
+    JobRepository.enqueue(). Verify the Celery task fires for a non-trusted match.
+    """
+    settings = Settings(trusted_auto_apply_enabled=True)
 
-    with session.begin():
-        result = ClassificationService(
-            session,
-            settings,
-        ).classify(
-            event(
-                "work_email_address",
-                "evt-2",
+    fake_async = MagicMock()
+    fake_async.id = "00000000-0000-0000-0000-000000000012"
+
+    with patch(
+        "app.tasks.classification.create_om_suggestions.delay",
+        return_value=fake_async,
+    ) as mock_delay:
+        with session.begin():
+            result = ClassificationService(session, settings).classify(
+                event("work_email_address", "evt-2")
             )
-        )
 
-    claimed = JobRepository(
-        session
-    ).claim_batch(
-        worker_id="test",
-        limit=10,
-    )
-
-    assert (
-        result["action"]
-        == ClassificationAction.OPENMETADATA_SUGGESTION.value
-    )
-    assert len(claimed) == 1
-    assert (
-        claimed[0].job_type
-        == JobType.CREATE_OM_SUGGESTIONS.value
-    )
+    assert result["action"] == ClassificationAction.OPENMETADATA_SUGGESTION.value
+    mock_delay.assert_called_once()
 
 
 def test_no_match_uses_agent_job_when_agent_worker_enabled(

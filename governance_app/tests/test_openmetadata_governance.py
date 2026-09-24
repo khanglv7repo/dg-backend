@@ -192,32 +192,40 @@ def test_suggestion_service_validates_batch_before_creating_anything(session) ->
 
 
 def test_trusted_auto_apply_enqueues_ranger_tag_sync(session) -> None:
+    """After the GovernanceJob→Celery migration, ConfirmedTagApplicationService
+    dispatches SYNC_RANGER_TAGS via sync_tags_to_ranger.delay() instead of
+    JobRepository.enqueue(). Verify the Celery task fires with the right payload
+    and that the result tag_sync_job_id is the Celery task id.
+    """
+    from unittest.mock import MagicMock, patch
+
     fake = FakeConfirmedOpenMetadata()
+    fake_async = MagicMock()
+    fake_async.id = "00000000-0000-0000-0000-000000000031"
 
-    with session.begin():
-        result = ConfirmedTagApplicationService(
-            session,
-            fake,
-            bot_name="governance-execution-bot",
-        ).apply(
-            classification_run_id="run-1",
-            entity_type="table",
-            entity_fqn="hive.sales.customers",
-            entity_tags=[],
-            field_tags={"columns.email": ["PII.Email"]},
-            correlation_id="corr",
-        )
-
-    job = session.scalar(select(GovernanceJob))
+    with patch(
+        "app.tasks.tag_sync.sync_tags_to_ranger.delay",
+        return_value=fake_async,
+    ) as mock_delay:
+        with session.begin():
+            result = ConfirmedTagApplicationService(
+                session,
+                fake,
+                bot_name="governance-execution-bot",
+            ).apply(
+                classification_run_id="run-1",
+                entity_type="table",
+                entity_fqn="hive.sales.customers",
+                entity_tags=[],
+                field_tags={"columns.email": ["PII.Email"]},
+                correlation_id="corr",
+            )
 
     assert fake.applied is not None
     assert fake.asserted is not None
-    assert job is not None
-    assert job.job_type == JobType.SYNC_RANGER_TAGS.value
-    assert job.payload == {
-        "entity_type": "table",
-        "entity_fqn": "hive.sales.customers",
-        "classification_run_id": "run-1",
-        "correlation_id": "corr",
-    }
-    assert result["tag_sync_job_id"] == str(job.id)
+    mock_delay.assert_called_once()
+    call_kwargs = mock_delay.call_args.kwargs
+    assert call_kwargs["entity_type"] == "table"
+    assert call_kwargs["entity_fqn"] == "hive.sales.customers"
+    assert call_kwargs["correlation_id"] == "corr"
+    assert result["tag_sync_job_id"] == "00000000-0000-0000-0000-000000000031"

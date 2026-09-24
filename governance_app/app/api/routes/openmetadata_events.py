@@ -1,17 +1,15 @@
 from __future__ import annotations
 
 from typing import Annotated, Any
-from uuid import uuid4
 from fastapi import APIRouter, Header, Query, Request, status
 
 from app.api.dependencies import AppSettings, DbSession
-from app.models.enums import JobType
-from app.repositories.jobs import JobRepository
 from app.schemas.common import AcceptedResponse
 from app.schemas.openmetadata_events import (
     OpenMetadataChangeEventRequest,
     OpenMetadataWebhookResponse,
 )
+from app.services.intake import _DispatchedTaskRef
 from app.services.openmetadata_event_adapter import OpenMetadataEventAdapterService
 
 router = APIRouter()
@@ -113,12 +111,18 @@ def trigger_unclassified_asset_discovery(
     db: DbSession,
     settings: AppSettings,
 ) -> AcceptedResponse:
-    """Manually or scheduled trigger for watermark-based asset discovery."""
-    with db.begin():
-        job = JobRepository(db).enqueue(
-            job_type=JobType.DISCOVER_UNCLASSIFIED_ASSETS,
-            idempotency_key=f"discover:manual:{uuid4()}",
-            payload={"source": "manual_trigger"},
-            max_attempts=3,
-        )
+    """Manually or scheduled trigger for watermark-based asset discovery.
+
+    Migrated from JobRepository.enqueue(DISCOVER_UNCLASSIFIED_ASSETS) to
+    discover_unclassified_assets.delay() per docs/13_IMPLEMENTATION_SPEC.md
+    section 9 (job engine decision: keep Celery, migrate all 9 GovernanceJob
+    callers to Celery .delay() before removing GovernanceJob).
+    """
+    from app.tasks.discovery import discover_unclassified_assets
+
+    task = discover_unclassified_assets.delay(
+        payload={"source": "manual_trigger"},
+    )
+    job = _DispatchedTaskRef(task)
     return AcceptedResponse(job_id=job.id, status=job.status)
+
