@@ -1,24 +1,18 @@
-"""DQ TestCase creation service.
+"""DQ governance lifecycle for OpenMetadata 2.0.2.
 
-Gated by B1-B5 all PASS (planning/evidence/TASK-04/). Implements Agent
-DIRECT-CREATE + STAGED for DQ TestCases:
+STAGED is Backend-only. A TestCase is not created in OpenMetadata until an
+explicit operator/admin approval has occurred. Materialization then creates
+(or recovers) the deterministic TestCase; OpenMetadata 2.0.2 automatically
+attaches it to the table's Basic TestSuite, which is the executable suite
+relationship used by the DQ runtime.
 
-- Deterministic FQN: dg_<sha256(natural_key)[:32]> (B3), used as the
-  OM-side idempotency key -- durable identity, NOT optional.
-- testcase_registry (I1) is Backend-side coordination/crash-recovery,
-  separate from and in addition to the deterministic FQN.
-- STAGED = create via REST /api/v1/dataQuality/testCases with the observed
-  entityLink shape, left attached only to its auto-generated `basic`
-  (logical) TestSuite -- OM's own execution engine never picks it up in
-  this deployment (PIPELINE_SERVICE_CLIENT_ENABLED=false), per B2's PASS
-  finding.
-- EXECUTABLE = a separate, explicit, auditable Backend/Celery-driven
-  transition (create/reuse an executable TestSuite + attach), never
-  implicit.
+Backend lifecycle:
+    STAGED -> APPROVED -> EXECUTABLE
 
-natural_key = (target_entity_fqn, test_definition_fqn, stable_test_slot_id)
-stable_test_slot_id = rule_id + "::" + test_key if test_key else rule_id
-(docs/09_POC_SPECIFICATION.md section 1, B4(a)).
+OpenMetadata materialization state:
+    RESERVED -> CONFIRMED
+
+These are deliberately separate state machines.
 """
 from __future__ import annotations
 
@@ -30,7 +24,7 @@ from sqlalchemy.orm import Session
 
 from app.clients.openmetadata import OpenMetadataClient
 from app.core.config import Settings
-from app.core.errors import ConflictError, ValidationError
+from app.core.errors import ConflictError, ExternalSystemError, ValidationError
 from app.repositories.testcase_registry import TestCaseRegistryRepository
 
 
@@ -57,7 +51,7 @@ class DQService:
         session: Session,
         settings: Settings,
         *,
-        om_client: OpenMetadataClient,
+        om_client: OpenMetadataClient | None = None,
     ) -> None:
         self.session = session
         self.settings = settings
@@ -74,106 +68,49 @@ class DQService:
         test_key: str | None,
         column_name: str | None,
         worker_id: str,
+        rationale: str | None = None,
     ) -> dict[str, Any]:
+        """Persist a DQ spec only; never write OpenMetadata on Agent intake."""
         if not target_asset_fqn or not test_definition_fqn or not rule_id:
             raise ValidationError(
                 "target_asset_fqn, test_definition_fqn, and rule_id are required"
             )
 
-        stable_test_slot_id = build_stable_test_slot_id(rule_id=rule_id, test_key=test_key)
+        stable_test_slot_id = build_stable_test_slot_id(
+            rule_id=rule_id,
+            test_key=test_key,
+        )
         natural_key_hash = build_natural_key_hash(
             target_entity_fqn=target_asset_fqn,
             test_definition_fqn=test_definition_fqn,
             stable_test_slot_id=stable_test_slot_id,
         )
+        spec_payload = {
+            "target_asset_fqn": target_asset_fqn,
+            "test_definition_fqn": test_definition_fqn,
+            "parameter_values": parameter_values,
+            "rule_id": rule_id,
+            "test_key": test_key,
+            "column_name": column_name,
+            "rationale": rationale,
+        }
 
-        # I1 Defense Layer 1: Backend-side reservation, serializes concurrent
-        # workers before any OM call is made.
         record, reserved_now = self.registry.reserve(
             natural_key_hash=natural_key_hash,
             target_entity_fqn=target_asset_fqn,
             test_definition_fqn=test_definition_fqn,
             stable_test_slot_id=stable_test_slot_id,
             worker_id=worker_id,
+            spec_payload=spec_payload,
         )
         self.session.commit()
 
-        if not reserved_now:
-            if record.reservation_state == "CONFIRMED":
-                # Idempotent: the TestCase already exists in OM under this
-                # exact deterministic name. Same logical request -> same
-                # result, safe to return as-is (B3's own confirmed
-                # duplicate-create-blocked semantics).
-                # Reservation confirmation only proves the deterministic OM
-                # TestCase exists. Lifecycle state is persisted separately:
-                # STAGED may later become APPROVED by an explicit human/
-                # operator action. EXECUTABLE remains unavailable until its
-                # OpenMetadata API contract is verified and implemented.
-                return {
-                    "id": str(record.id),
-                    "natural_key_hash": natural_key_hash,
-                    "om_testcase_id": record.om_testcase_id,
-                    "status": record.lifecycle_state,
-                }
-            if record.reservation_state == "FAILED":
-                # Found live during TASK-08's audit: a transient failure
-                # (OM 401/timeout/etc) must not permanently block this exact
-                # natural_key_hash. Re-arm the row under this worker and fall
-                # through to the normal create-in-OM path below, instead of
-                # returning 409 forever.
-                record = self.registry.retry_after_failure(
-                    record.id, worker_id=worker_id
-                )
-                self.session.commit()
-                if record is None:
-                    # Raced with another worker's retry between our read and
-                    # this call -- safe to treat exactly like the ordinary
-                    # "reserved by another worker" case below.
-                    raise ConflictError(
-                        f"natural_key_hash {natural_key_hash!r} is being "
-                        "retried by another worker"
-                    )
-            else:
-                # RESERVED by another worker's in-flight attempt -- B3's
-                # outer safety net (OM's own 409-on-duplicate) is the last
-                # resort; here we fail fast at the coordination layer instead.
-                raise ConflictError(
-                    f"natural_key_hash {natural_key_hash!r} is already reserved "
-                    f"by worker {record.worker_id!r}"
-                )
-
-        # I1 Defense Layer 2 (durable OM-side idempotency key, B3): the
-        # deterministic name itself prevents duplicate creation even if two
-        # Backend processes somehow both reach this point (e.g. after a
-        # crash-recovery re-attempt).
-        entity_link = self.om_client.build_entity_link(
-            entity_type="table",
-            entity_fqn=target_asset_fqn,
-            field_path=f"columns.{column_name}" if column_name else None,
-        )
-
-        try:
-            response = self.om_client.create_test_case(
-                name=natural_key_hash,
-                entity_link=entity_link,
-                test_definition_fqn=test_definition_fqn,
-                parameter_values=parameter_values,
+        if not reserved_now and dict(record.spec_payload or {}) != spec_payload:
+            raise ConflictError(
+                "same DQ natural key already exists with a different staged spec"
             )
-        except Exception:
-            self.registry.mark_failed(record.id)
-            self.session.commit()
-            raise
 
-        om_testcase_id = str(response.get("id") or "")
-        self.registry.confirm(record.id, om_testcase_id=om_testcase_id)
-        self.session.commit()
-
-        return {
-            "id": str(record.id),
-            "natural_key_hash": natural_key_hash,
-            "om_testcase_id": om_testcase_id,
-            "status": record.lifecycle_state,
-        }
+        return self._result(record)
 
     def approve_staged_test_case(
         self,
@@ -181,19 +118,112 @@ class DQService:
         registry_id: str,
         actor_id: str,
     ) -> dict[str, Any]:
-        """Human/operator approval only: STAGED -> APPROVED.
+        """Explicit human/operator STAGED -> APPROVED transition."""
+        identifier = self._uuid(registry_id)
+        record = self.registry.approve(identifier, actor_id=actor_id)
+        self.session.commit()
+        return self._result(record)
 
-        This method deliberately does not attach an executable TestSuite and
-        does not schedule a run. APPROVED is governance intent; EXECUTABLE
-        requires a separately verified OpenMetadata 2.0.2 API contract.
+    def materialize_approved_test_case(
+        self,
+        *,
+        registry_id: str,
+    ) -> dict[str, Any]:
+        """Create/recover the approved TestCase in OpenMetadata.
+
+        OpenMetadata 2.0.2 creates/resolves the Basic TestSuite during
+        TestCaseRepository.prepare(). We require a read-back with non-null
+        testSuite before marking the Backend lifecycle EXECUTABLE.
         """
+        if self.om_client is None:
+            raise ValidationError("OpenMetadata client is required for materialization")
+
+        identifier = self._uuid(registry_id)
+        record = self.registry.get(identifier)
+        if record is None:
+            raise ConflictError(f"testcase registry row {registry_id!r} was not found")
+        if record.lifecycle_state == "EXECUTABLE":
+            return self._result(record)
+        if record.lifecycle_state != "APPROVED":
+            raise ConflictError(
+                f"testcase {registry_id!r} cannot materialize from "
+                f"{record.lifecycle_state!r}"
+            )
+
+        spec = dict(record.spec_payload or {})
+        target_asset_fqn = str(spec.get("target_asset_fqn") or "")
+        if not target_asset_fqn:
+            raise ValidationError("staged DQ spec is missing target_asset_fqn")
+
+        observed = self.om_client.find_test_case_by_entity_and_name(
+            entity_fqn=target_asset_fqn,
+            name=record.natural_key_hash,
+        )
+        if observed is None:
+            entity_link = self.om_client.build_entity_link(
+                entity_type="table",
+                entity_fqn=target_asset_fqn,
+                field_path=(
+                    f"columns.{spec['column_name']}"
+                    if spec.get("column_name")
+                    else None
+                ),
+            )
+            created = self.om_client.create_test_case(
+                name=record.natural_key_hash,
+                entity_link=entity_link,
+                test_definition_fqn=str(spec["test_definition_fqn"]),
+                parameter_values=dict(spec.get("parameter_values") or {}),
+            )
+            created_fqn = str(created.get("fullyQualifiedName") or "")
+            observed = (
+                self.om_client.get_test_case_by_name(created_fqn)
+                if created_fqn
+                else self.om_client.find_test_case_by_entity_and_name(
+                    entity_fqn=target_asset_fqn,
+                    name=record.natural_key_hash,
+                )
+            )
+
+        if not observed:
+            raise ExternalSystemError(
+                "OpenMetadata TestCase create/read-back did not return the TestCase",
+                system="openmetadata",
+                retryable=True,
+            )
+        if not observed.get("testSuite"):
+            raise ExternalSystemError(
+                "OpenMetadata TestCase is not linked to a Basic TestSuite",
+                system="openmetadata",
+                retryable=True,
+            )
+
+        om_testcase_id = str(observed.get("id") or "")
+        om_testcase_fqn = str(observed.get("fullyQualifiedName") or "")
+        if not om_testcase_id or not om_testcase_fqn:
+            raise ExternalSystemError(
+                "OpenMetadata TestCase read-back is missing id or fullyQualifiedName",
+                system="openmetadata",
+                retryable=True,
+            )
+
+        record = self.registry.mark_executable(
+            record.id,
+            om_testcase_id=om_testcase_id,
+            om_testcase_fqn=om_testcase_fqn,
+        )
+        self.session.commit()
+        return self._result(record)
+
+    @staticmethod
+    def _uuid(value: str) -> uuid.UUID:
         try:
-            identifier = uuid.UUID(str(registry_id))
+            return uuid.UUID(str(value))
         except (TypeError, ValueError, AttributeError) as exc:
             raise ValidationError("registry_id must be a UUID") from exc
 
-        record = self.registry.approve(identifier, actor_id=actor_id)
-        self.session.commit()
+    @staticmethod
+    def _result(record) -> dict[str, Any]:
         return {
             "id": str(record.id),
             "natural_key_hash": record.natural_key_hash,
