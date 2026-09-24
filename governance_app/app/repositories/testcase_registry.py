@@ -136,6 +136,7 @@ class TestCaseRegistryRepository:
         *,
         om_testcase_id: str,
         om_testcase_fqn: str,
+        om_test_suite_fqn: str,
     ) -> TestCaseRegistry:
         record = self.session.get(TestCaseRegistry, record_id)
         if record is None:
@@ -148,6 +149,7 @@ class TestCaseRegistryRepository:
         record.reservation_state = "CONFIRMED"
         record.om_testcase_id = om_testcase_id
         record.om_testcase_fqn = om_testcase_fqn
+        record.om_test_suite_fqn = om_test_suite_fqn
         record.confirmed_at = utcnow()
         record.lifecycle_state = "EXECUTABLE"
         self.session.flush()
@@ -165,3 +167,100 @@ class TestCaseRegistryRepository:
             if permanent:
                 record.lifecycle_state = "FAILED"
             self.session.flush()
+
+
+    def prepare_run(
+        self,
+        record_id,
+        *,
+        actor_id: str,
+    ) -> tuple[TestCaseRegistry, uuid.UUID]:
+        record = self.get(record_id)
+        if record is None:
+            raise ConflictError(f"testcase registry row {record_id!r} was not found")
+        if record.lifecycle_state != "EXECUTABLE":
+            raise ConflictError(
+                f"testcase {record_id!r} cannot run from {record.lifecycle_state!r}"
+            )
+        if record.last_run_status in {"QUEUED", "RUNNING"} and record.active_run_id:
+            raise ConflictError(
+                f"testcase {record_id!r} already has active run {record.active_run_id}"
+            )
+
+        run_id = uuid.uuid4()
+        record.run_generation = int(record.run_generation or 0) + 1
+        record.active_run_id = run_id
+        record.last_run_status = "QUEUED"
+        record.last_run_started_at = None
+        record.last_run_finished_at = None
+        record.last_run_requested_by = actor_id
+        record.last_run_error = None
+        record.last_result = {}
+        self.session.flush()
+        return record, run_id
+
+    def mark_run_started(
+        self,
+        record_id,
+        *,
+        run_id: uuid.UUID,
+    ) -> TestCaseRegistry:
+        record = self.get(record_id)
+        if record is None:
+            raise ConflictError(f"testcase registry row {record_id!r} was not found")
+        if record.active_run_id != run_id:
+            raise ConflictError(
+                f"DQ run {run_id} is stale; active run is {record.active_run_id}"
+            )
+        if record.last_run_status == "COMPLETED":
+            return record
+        if record.last_run_status not in {"QUEUED", "RUNNING"}:
+            raise ConflictError(
+                f"DQ run {run_id} cannot start from {record.last_run_status!r}"
+            )
+        record.last_run_status = "RUNNING"
+        if record.last_run_started_at is None:
+            record.last_run_started_at = utcnow()
+        self.session.flush()
+        return record
+
+    def mark_run_completed(
+        self,
+        record_id,
+        *,
+        run_id: uuid.UUID,
+        result: dict,
+    ) -> TestCaseRegistry:
+        record = self.get(record_id)
+        if record is None:
+            raise ConflictError(f"testcase registry row {record_id!r} was not found")
+        if record.active_run_id != run_id:
+            raise ConflictError(
+                f"DQ run {run_id} is stale; active run is {record.active_run_id}"
+            )
+        record.last_run_status = "COMPLETED"
+        record.last_run_finished_at = utcnow()
+        record.last_run_error = None
+        record.last_result = result
+        self.session.flush()
+        return record
+
+    def mark_run_failed(
+        self,
+        record_id,
+        *,
+        run_id: uuid.UUID,
+        error: str,
+    ) -> TestCaseRegistry:
+        record = self.get(record_id)
+        if record is None:
+            raise ConflictError(f"testcase registry row {record_id!r} was not found")
+        if record.active_run_id != run_id:
+            raise ConflictError(
+                f"DQ run {run_id} is stale; active run is {record.active_run_id}"
+            )
+        record.last_run_status = "FAILED"
+        record.last_run_finished_at = utcnow()
+        record.last_run_error = error[:4000]
+        self.session.flush()
+        return record
