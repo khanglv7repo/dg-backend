@@ -3,6 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+from app.core.errors import ExternalSystemError, ValidationError
 from app.tasks import dq as dq_task
 
 
@@ -95,3 +96,48 @@ def test_legacy_staged_reserved_row_reconciles_existing_om_testcase() -> None:
     )
     assert result["reconciled"] == 1
     assert result["redispatched"] == 0
+
+
+def test_materialize_task_permanent_validation_failure_marks_failed() -> None:
+    session = MagicMock()
+    repository = MagicMock()
+    om = MagicMock()
+    service = MagicMock()
+    service.materialize_approved_test_case.side_effect = ValidationError("bad staged spec")
+
+    with patch.object(dq_task, "SessionLocal", return_value=_session_cm(session)), patch.object(
+        dq_task, "_execution_om_client", return_value=om
+    ), patch.object(dq_task, "DQService", return_value=service), patch.object(
+        dq_task, "TestCaseRegistryRepository", return_value=repository
+    ):
+        result = dq_task.materialize_approved_test_case.run(registry_id="r1")
+
+    assert result["status"] == "FAILED"
+    assert result["retryable"] is False
+    repository.mark_materialization_failed.assert_called_once_with(
+        "r1", permanent=True
+    )
+
+
+def test_materialize_task_nonretryable_om_failure_marks_failed() -> None:
+    session = MagicMock()
+    repository = MagicMock()
+    om = MagicMock()
+    service = MagicMock()
+    service.materialize_approved_test_case.side_effect = ExternalSystemError(
+        "forbidden",
+        system="openmetadata",
+        retryable=False,
+    )
+
+    with patch.object(dq_task, "SessionLocal", return_value=_session_cm(session)), patch.object(
+        dq_task, "_execution_om_client", return_value=om
+    ), patch.object(dq_task, "DQService", return_value=service), patch.object(
+        dq_task, "TestCaseRegistryRepository", return_value=repository
+    ):
+        result = dq_task.materialize_approved_test_case.run(registry_id="r1")
+
+    assert result["status"] == "FAILED"
+    repository.mark_materialization_failed.assert_called_once_with(
+        "r1", permanent=True
+    )
