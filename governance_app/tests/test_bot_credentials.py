@@ -21,10 +21,10 @@ def test_default_runtime_identities_are_machine_bots() -> None:
     assert settings.openmetadata_agent_bot_name.endswith("-bot")
 
 
-def test_remaining_openmetadata_worker_tokens_must_be_distinct() -> None:
+def test_execution_and_ingestion_tokens_must_be_distinct() -> None:
     with pytest.raises(ValidationError, match="must be different"):
         Settings(
-            OM_AUTO_TAG_BOT_TOKEN=SecretStr("same-token"),
+            OM_EXECUTION_BOT_TOKEN=SecretStr("same-token"),
             OM_INGESTION_BOT_TOKEN=SecretStr("same-token"),
         )
 
