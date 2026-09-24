@@ -215,6 +215,40 @@ class DQService:
                 retryable=True,
             )
 
+        suite = self.om_client.get_test_suite_by_name(om_test_suite_fqn)
+        is_basic = suite.get("basic") is True
+        legacy_executable = suite.get("executable") is True
+        if not (is_basic or legacy_executable):
+            raise ExternalSystemError(
+                "OpenMetadata TestCase is linked to a logical/non-executable TestSuite",
+                system="openmetadata",
+                retryable=False,
+                details={"test_suite_fqn": om_test_suite_fqn},
+            )
+
+        suite_entity = (
+            suite.get("basicEntityReference")
+            or suite.get("executableEntityReference")
+            or {}
+        )
+        if isinstance(suite_entity, dict):
+            suite_entity_fqn = str(
+                suite_entity.get("fullyQualifiedName")
+                or suite_entity.get("name")
+                or ""
+            ).strip()
+            if suite_entity_fqn and suite_entity_fqn != target_asset_fqn:
+                raise ExternalSystemError(
+                    "OpenMetadata Basic TestSuite is linked to a different entity",
+                    system="openmetadata",
+                    retryable=False,
+                    details={
+                        "test_suite_fqn": om_test_suite_fqn,
+                        "expected_entity_fqn": target_asset_fqn,
+                        "observed_entity_fqn": suite_entity_fqn,
+                    },
+                )
+
         record = self.registry.mark_executable(
             record.id,
             om_testcase_id=om_testcase_id,
