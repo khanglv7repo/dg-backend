@@ -4,6 +4,8 @@ existence -- OpenMetadata is (docs/13_IMPLEMENTATION_SPEC.md section 3).
 """
 from __future__ import annotations
 
+import uuid
+
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -17,7 +19,12 @@ class TestCaseRegistryRepository:
         self.session = session
 
     def get(self, record_id) -> TestCaseRegistry | None:
-        return self.session.get(TestCaseRegistry, record_id)
+        identifier = (
+            record_id
+            if isinstance(record_id, uuid.UUID)
+            else uuid.UUID(str(record_id))
+        )
+        return self.session.get(TestCaseRegistry, identifier)
 
     def get_by_natural_key_hash(self, natural_key_hash: str) -> TestCaseRegistry | None:
         return (
