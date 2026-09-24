@@ -11,15 +11,7 @@ from app.models.job import JSON_TYPE, UUID_TYPE, utcnow
 
 
 class TestCaseRegistry(Base):
-    """Backend-side coordination/crash-recovery for Agent DIRECT-CREATE DQ
-    TestCase writes (I1). This registry is NOT the source of truth for
-    TestCase existence -- OpenMetadata is. It exists only to serialize
-    concurrent workers reserving the same natural_key_hash and to let a
-    crash-recovery job reconcile against OM by deterministic FQN.
-
-    natural_key_hash is the deterministic FQN value confirmed by B3:
-    dg_<sha256(natural_key)[:32]>.
-    """
+    """Backend DQ governance + OpenMetadata materialization registry.\n\n    lifecycle_state tracks governance intent:\n        STAGED -> APPROVED -> EXECUTABLE | FAILED\n\n    reservation_state tracks OM materialization:\n        NOT_STARTED -> RESERVED -> CONFIRMED | FAILED\n\n    OpenMetadata remains authoritative for the materialized TestCase itself.\n    natural_key_hash is the deterministic TestCase name/idempotency key.\n    """
 
     __tablename__ = "testcase_registry"
     __table_args__ = (
