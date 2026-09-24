@@ -225,13 +225,13 @@ def test_mask_hash_is_confirmed_against_control_transformation() -> None:
     subject = FakeTrino(
         result={
             "query_id": "subject-q",
-            "rows": [["varchar", "A1"], ["varchar", "B2"]],
+            "rows": [["A1"], ["B2"]],
         }
     )
     control = FakeTrino(
         result={
             "query_id": "control-q",
-            "rows": [["A1"], ["B2"]],
+            "rows": [["varchar", "A1"], ["varchar", "B2"]],
         }
     )
     result = PolicyRuntimeVerificationService(
