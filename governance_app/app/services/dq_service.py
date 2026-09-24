@@ -104,17 +104,11 @@ class DQService:
                 # exact deterministic name. Same logical request -> same
                 # result, safe to return as-is (B3's own confirmed
                 # duplicate-create-blocked semantics).
-                # Found live during TASK-08's audit: `confirmed_at` only
-                # means the registry reservation was confirmed (i.e. OM
-                # create succeeded) -- it says nothing about OM's own
-                # STAGED->EXECUTABLE transition, which is a separate,
-                # not-yet-implemented Backend/Celery-driven step (this
-                # class's own module docstring). The old code returned
-                # "EXECUTABLE" here unconditionally on every idempotent
-                # retry, which was simply wrong -- there is currently no
-                # registry field that tracks the real OM executable state,
-                # so STAGED is always the correct answer until that
-                # transition is implemented and its own state is persisted.
+                # Reservation confirmation only proves the deterministic OM
+                # TestCase exists. Lifecycle state is persisted separately:
+                # STAGED may later become APPROVED by an explicit human/
+                # operator action. EXECUTABLE remains unavailable until its
+                # OpenMetadata API contract is verified and implemented.
                 return {
                     "id": str(record.id),
                     "natural_key_hash": natural_key_hash,
