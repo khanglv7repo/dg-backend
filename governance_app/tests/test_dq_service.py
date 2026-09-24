@@ -1,18 +1,3 @@
-"""Regression tests for the 2 real bugs found + fixed during TASK-08's live
-audit (2026-09-24, planning/EXECUTION_LOG.md):
-
-1. A FAILED registry row used to permanently block all future retries with
-   409 CONFLICT forever -- no retry path existed despite a code comment
-   claiming one did. Fixed via TestCaseRegistryRepository.retry_after_failure().
-2. Idempotent retry reports the persisted lifecycle state instead of deriving
-   executability from reservation confirmation.
-
-Both bugs were live-verified against a real running Backend + OpenMetadata
-instance before being fixed here; these tests are the permanent regression
-coverage the manifest's "logical lifecycle, validate-before-write, compliance
-rollup" required-tests column calls for (previously entirely unmet -- zero
-test files existed for dq_service.py before this file).
-"""
 from __future__ import annotations
 
 from unittest.mock import MagicMock
@@ -20,7 +5,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from app.core.config import Settings
-from app.core.errors import ConflictError, ValidationError
+from app.core.errors import ConflictError, ExternalSystemError, ValidationError
 from app.services.dq_service import (
     DQService,
     build_natural_key_hash,
@@ -32,18 +17,28 @@ def settings() -> Settings:
     return Settings(app_env="test")
 
 
-def om_client(*, create_result: dict | None = None, create_side_effect=None) -> MagicMock:
-    client = MagicMock()
-    client.build_entity_link.return_value = "<#E::table::financial.crm.customers>"
-    if create_side_effect is not None:
-        client.create_test_case.side_effect = create_side_effect
-    else:
-        client.create_test_case.return_value = create_result or {"id": "om-tc-1"}
-    return client
+def staged(session, **overrides) -> tuple[DQService, dict]:
+    values = {
+        "target_asset_fqn": "financial.crm.customers",
+        "test_definition_fqn": "columnValuesToBeNotNull",
+        "parameter_values": {},
+        "rule_id": "rule-1",
+        "test_key": None,
+        "column_name": "email",
+        "worker_id": "agent-1",
+        "rationale": "email must exist",
+    }
+    values.update(overrides)
+    service = DQService(session, settings())
+    return service, service.create_staged_test_case(**values)
 
 
-def service(session, *, om: MagicMock) -> DQService:
-    return DQService(session, settings(), om_client=om)
+def approved(session, **overrides) -> tuple[DQService, dict]:
+    service, result = staged(session, **overrides)
+    return service, service.approve_staged_test_case(
+        registry_id=result["id"],
+        actor_id="operator-1",
+    )
 
 
 def test_build_stable_test_slot_id_uses_test_key_when_present() -> None:
@@ -53,20 +48,24 @@ def test_build_stable_test_slot_id_uses_test_key_when_present() -> None:
 
 def test_build_natural_key_hash_is_deterministic_and_prefixed() -> None:
     h1 = build_natural_key_hash(
-        target_entity_fqn="a.b.c", test_definition_fqn="d", stable_test_slot_id="r1"
+        target_entity_fqn="a.b.c",
+        test_definition_fqn="d",
+        stable_test_slot_id="r1",
     )
     h2 = build_natural_key_hash(
-        target_entity_fqn="a.b.c", test_definition_fqn="d", stable_test_slot_id="r1"
+        target_entity_fqn="a.b.c",
+        test_definition_fqn="d",
+        stable_test_slot_id="r1",
     )
     assert h1 == h2
     assert h1.startswith("dg_")
     assert len(h1) == len("dg_") + 32
 
 
-def test_missing_required_fields_raises_validation_error(session) -> None:
-    svc = service(session, om=om_client())
+def test_stage_requires_core_fields(session) -> None:
+    service = DQService(session, settings())
     with pytest.raises(ValidationError):
-        svc.create_staged_test_case(
+        service.create_staged_test_case(
             target_asset_fqn="",
             test_definition_fqn="d",
             parameter_values={},
@@ -75,271 +74,137 @@ def test_missing_required_fields_raises_validation_error(session) -> None:
             column_name=None,
             worker_id="w1",
         )
-    svc.om_client.create_test_case.assert_not_called()
 
 
-def test_fresh_create_returns_staged_and_confirms_registry(session) -> None:
-    om = om_client(create_result={"id": "om-tc-1"})
-    svc = service(session, om=om)
-
-    result = svc.create_staged_test_case(
-        target_asset_fqn="financial.crm.customers",
-        test_definition_fqn="columnValuesToBeNotNull",
-        parameter_values={},
-        rule_id="rule-1",
-        test_key=None,
-        column_name="email",
-        worker_id="worker-1",
-    )
+def test_stage_is_backend_only_and_does_not_require_openmetadata(session) -> None:
+    service, result = staged(session)
 
     assert result["status"] == "STAGED"
-    assert result["om_testcase_id"] == "om-tc-1"
-    om.create_test_case.assert_called_once()
+    assert result["om_testcase_id"] is None
 
-    record = svc.registry.get_by_natural_key_hash(result["natural_key_hash"])
-    assert record.reservation_state == "CONFIRMED"
-    assert record.om_testcase_id == "om-tc-1"
-
-
-def test_second_call_by_different_worker_is_reserved_conflict(session) -> None:
-    """A RESERVED row (another worker's in-flight attempt, never confirmed or
-    failed) must still 409 -- only FAILED gets the new retry path."""
-    om = om_client()
-    svc = service(session, om=om)
-
-    # Manually reserve without confirming, simulating an in-flight worker.
-    svc.registry.reserve(
-        natural_key_hash=build_natural_key_hash(
-            target_entity_fqn="financial.crm.customers",
-            test_definition_fqn="columnValuesToBeNotNull",
-            stable_test_slot_id="rule-1",
-        ),
-        target_entity_fqn="financial.crm.customers",
-        test_definition_fqn="columnValuesToBeNotNull",
-        stable_test_slot_id="rule-1",
-        worker_id="worker-in-flight",
-    )
-    session.commit()
-
-    with pytest.raises(ConflictError):
-        svc.create_staged_test_case(
-            target_asset_fqn="financial.crm.customers",
-            test_definition_fqn="columnValuesToBeNotNull",
-            parameter_values={},
-            rule_id="rule-1",
-            test_key=None,
-            column_name=None,
-            worker_id="worker-2",
-        )
-    om.create_test_case.assert_not_called()
-
-
-def test_idempotent_retry_of_confirmed_row_reports_persisted_lifecycle(session) -> None:
-    """Reservation confirmation and DQ lifecycle are separate state machines."""
-    om = om_client(create_result={"id": "om-tc-1"})
-    svc = service(session, om=om)
-
-    first = svc.create_staged_test_case(
-        target_asset_fqn="financial.crm.customers",
-        test_definition_fqn="columnValuesToBeNotNull",
-        parameter_values={},
-        rule_id="rule-1",
-        test_key=None,
-        column_name=None,
-        worker_id="worker-1",
-    )
-    assert first["status"] == "STAGED"
-
-    second = svc.create_staged_test_case(
-        target_asset_fqn="financial.crm.customers",
-        test_definition_fqn="columnValuesToBeNotNull",
-        parameter_values={},
-        rule_id="rule-1",
-        test_key=None,
-        column_name=None,
-        worker_id="worker-2",
-    )
-    assert second["status"] == "STAGED"
-    assert second["id"] == first["id"]
-    assert second["om_testcase_id"] == first["om_testcase_id"]
-    # Only one OM create call across both attempts -- the second was a pure
-    # idempotent registry read, never touched OM.
-    om.create_test_case.assert_called_once()
-
-
-def test_failed_write_is_marked_failed_and_does_not_confirm(session) -> None:
-    om = om_client(create_side_effect=RuntimeError("OM 401"))
-    svc = service(session, om=om)
-
-    with pytest.raises(RuntimeError):
-        svc.create_staged_test_case(
-            target_asset_fqn="financial.crm.customers",
-            test_definition_fqn="columnValuesToBeNotNull",
-            parameter_values={},
-            rule_id="rule-1",
-            test_key=None,
-            column_name=None,
-            worker_id="worker-1",
-        )
-
-    natural_key_hash = build_natural_key_hash(
-        target_entity_fqn="financial.crm.customers",
-        test_definition_fqn="columnValuesToBeNotNull",
-        stable_test_slot_id="rule-1",
-    )
-    record = svc.registry.get_by_natural_key_hash(natural_key_hash)
-    assert record.reservation_state == "FAILED"
+    record = service.registry.get(result["id"])
+    assert record.lifecycle_state == "STAGED"
+    assert record.reservation_state == "RESERVED"
     assert record.om_testcase_id is None
+    assert record.spec_payload["column_name"] == "email"
 
 
-def test_retry_after_failure_succeeds_instead_of_409_forever(session) -> None:
-    """Regression for bug 1: a FAILED row must be retryable, not a permanent
-    409 CONFLICT. First attempt fails (simulated transient OM error), second
-    attempt with the same logical request must succeed."""
-    failing_om = om_client(create_side_effect=RuntimeError("transient OM 401"))
-    svc = service(session, om=failing_om)
-
-    with pytest.raises(RuntimeError):
-        svc.create_staged_test_case(
-            target_asset_fqn="financial.crm.customers",
-            test_definition_fqn="columnValuesToBeNotNull",
-            parameter_values={},
-            rule_id="rule-1",
-            test_key=None,
-            column_name=None,
-            worker_id="worker-1",
-        )
-
-    # Second attempt: OM now succeeds (simulates the transient error clearing).
-    svc.om_client = om_client(create_result={"id": "om-tc-recovered"})
-    result = svc.create_staged_test_case(
+def test_identical_stage_retry_is_idempotent(session) -> None:
+    service, first = staged(session)
+    second = service.create_staged_test_case(
         target_asset_fqn="financial.crm.customers",
         test_definition_fqn="columnValuesToBeNotNull",
         parameter_values={},
         rule_id="rule-1",
         test_key=None,
-        column_name=None,
-        worker_id="worker-2",
-    )
-
-    assert result["status"] == "STAGED"
-    assert result["om_testcase_id"] == "om-tc-recovered"
-
-    record = svc.registry.get_by_natural_key_hash(result["natural_key_hash"])
-    assert record.reservation_state == "CONFIRMED"
-    assert record.worker_id == "worker-2"
-
-
-def test_retry_after_failure_twice_in_a_row_keeps_working(session) -> None:
-    """A row can fail, retry-fail again, and still eventually succeed --
-    retry_after_failure must not be a one-shot escape hatch."""
-    svc = service(session, om=om_client(create_side_effect=RuntimeError("fail 1")))
-
-    with pytest.raises(RuntimeError):
-        svc.create_staged_test_case(
-            target_asset_fqn="a.b.c",
-            test_definition_fqn="d",
-            parameter_values={},
-            rule_id="r1",
-            test_key=None,
-            column_name=None,
-            worker_id="w1",
-        )
-
-    svc.om_client = om_client(create_side_effect=RuntimeError("fail 2"))
-    with pytest.raises(RuntimeError):
-        svc.create_staged_test_case(
-            target_asset_fqn="a.b.c",
-            test_definition_fqn="d",
-            parameter_values={},
-            rule_id="r1",
-            test_key=None,
-            column_name=None,
-            worker_id="w2",
-        )
-
-    svc.om_client = om_client(create_result={"id": "om-final"})
-    result = svc.create_staged_test_case(
-        target_asset_fqn="a.b.c",
-        test_definition_fqn="d",
-        parameter_values={},
-        rule_id="r1",
-        test_key=None,
-        column_name=None,
-        worker_id="w3",
-    )
-    assert result["status"] == "STAGED"
-    assert result["om_testcase_id"] == "om-final"
-
-
-def test_human_approval_transitions_staged_to_approved(session) -> None:
-    svc = service(session, om=om_client(create_result={"id": "om-tc-approve"}))
-    staged = svc.create_staged_test_case(
-        target_asset_fqn="financial.crm.customers",
-        test_definition_fqn="columnValuesToBeNotNull",
-        parameter_values={},
-        rule_id="rule-approve",
-        test_key=None,
         column_name="email",
-        worker_id="worker-1",
+        worker_id="agent-1",
+        rationale="email must exist",
     )
+    assert second["id"] == first["id"]
+    assert second["status"] == "STAGED"
 
-    approved = svc.approve_staged_test_case(
-        registry_id=staged["id"],
+
+def test_same_natural_key_with_different_spec_is_conflict(session) -> None:
+    service, _first = staged(session)
+    with pytest.raises(ConflictError, match="different staged spec"):
+        service.create_staged_test_case(
+            target_asset_fqn="financial.crm.customers",
+            test_definition_fqn="columnValuesToBeNotNull",
+            parameter_values={"threshold": 10},
+            rule_id="rule-1",
+            test_key=None,
+            column_name="email",
+            worker_id="agent-1",
+            rationale="changed semantics",
+        )
+
+
+def test_human_approval_is_backend_only_and_idempotent(session) -> None:
+    service, stage = staged(session)
+    first = service.approve_staged_test_case(
+        registry_id=stage["id"],
         actor_id="operator-1",
     )
-
-    assert approved["status"] == "APPROVED"
-    record = svc.registry.get(staged["id"])
-    assert record.lifecycle_state == "APPROVED"
-    assert record.approved_by == "operator-1"
-    assert record.approved_at is not None
-
-
-def test_approval_is_idempotent_and_does_not_touch_openmetadata(session) -> None:
-    om = om_client(create_result={"id": "om-tc-approve"})
-    svc = service(session, om=om)
-    staged = svc.create_staged_test_case(
-        target_asset_fqn="financial.crm.customers",
-        test_definition_fqn="columnValuesToBeNotNull",
-        parameter_values={},
-        rule_id="rule-approve-idempotent",
-        test_key=None,
-        column_name=None,
-        worker_id="worker-1",
-    )
-    first = svc.approve_staged_test_case(
-        registry_id=staged["id"], actor_id="operator-1"
-    )
-    second = svc.approve_staged_test_case(
-        registry_id=staged["id"], actor_id="operator-2"
+    second = service.approve_staged_test_case(
+        registry_id=stage["id"],
+        actor_id="operator-2",
     )
 
     assert first["status"] == second["status"] == "APPROVED"
-    assert svc.registry.get(staged["id"]).approved_by == "operator-1"
+    record = service.registry.get(stage["id"])
+    assert record.approved_by == "operator-1"
+    assert record.om_testcase_id is None
+
+
+def test_materialization_requires_approval(session) -> None:
+    service, stage = staged(session)
+    service.om_client = MagicMock()
+
+    with pytest.raises(ConflictError, match="cannot materialize"):
+        service.materialize_approved_test_case(registry_id=stage["id"])
+    service.om_client.create_test_case.assert_not_called()
+
+
+def test_materialization_creates_then_requires_basic_suite_readback(session) -> None:
+    service, approval = approved(session)
+    om = MagicMock()
+    om.find_test_case_by_entity_and_name.return_value = None
+    om.build_entity_link.return_value = (
+        "<#E::table::financial.crm.customers::columns::email>"
+    )
+    om.create_test_case.return_value = {
+        "id": "om-1",
+        "fullyQualifiedName": "financial.crm.customers.email.dg_abc",
+    }
+    om.get_test_case_by_name.return_value = {
+        "id": "om-1",
+        "name": "dg_abc",
+        "fullyQualifiedName": "financial.crm.customers.email.dg_abc",
+        "testSuite": {"id": "suite-1", "type": "testSuite"},
+    }
+    service.om_client = om
+
+    result = service.materialize_approved_test_case(registry_id=approval["id"])
+
+    assert result["status"] == "EXECUTABLE"
+    assert result["om_testcase_id"] == "om-1"
     om.create_test_case.assert_called_once()
+    record = service.registry.get(approval["id"])
+    assert record.reservation_state == "CONFIRMED"
+    assert record.lifecycle_state == "EXECUTABLE"
 
 
-def test_idempotent_create_after_approval_returns_approved(session) -> None:
-    svc = service(session, om=om_client(create_result={"id": "om-tc-approved"}))
-    first = svc.create_staged_test_case(
-        target_asset_fqn="a.b.approved",
-        test_definition_fqn="d",
-        parameter_values={},
-        rule_id="r-approved",
-        test_key=None,
-        column_name=None,
-        worker_id="w1",
-    )
-    svc.approve_staged_test_case(registry_id=first["id"], actor_id="operator")
+def test_materialization_reuses_existing_om_testcase_after_crash(session) -> None:
+    service, approval = approved(session)
+    om = MagicMock()
+    om.find_test_case_by_entity_and_name.return_value = {
+        "id": "om-existing",
+        "name": service.registry.get(approval["id"]).natural_key_hash,
+        "fullyQualifiedName": "financial.crm.customers.email.dg_existing",
+        "testSuite": {"id": "suite-1", "type": "testSuite"},
+    }
+    service.om_client = om
 
-    second = svc.create_staged_test_case(
-        target_asset_fqn="a.b.approved",
-        test_definition_fqn="d",
-        parameter_values={},
-        rule_id="r-approved",
-        test_key=None,
-        column_name=None,
-        worker_id="w2",
-    )
-    assert second["status"] == "APPROVED"
+    result = service.materialize_approved_test_case(registry_id=approval["id"])
+
+    assert result["status"] == "EXECUTABLE"
+    assert result["om_testcase_id"] == "om-existing"
+    om.create_test_case.assert_not_called()
+
+
+def test_materialization_without_basic_suite_never_marks_executable(session) -> None:
+    service, approval = approved(session)
+    om = MagicMock()
+    om.find_test_case_by_entity_and_name.return_value = {
+        "id": "om-1",
+        "name": "dg_x",
+        "fullyQualifiedName": "financial.crm.customers.email.dg_x",
+        "testSuite": None,
+    }
+    service.om_client = om
+
+    with pytest.raises(ExternalSystemError, match="Basic TestSuite"):
+        service.materialize_approved_test_case(registry_id=approval["id"])
+
+    assert service.registry.get(approval["id"]).lifecycle_state == "APPROVED"
