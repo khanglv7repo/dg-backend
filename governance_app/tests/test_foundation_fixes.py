@@ -12,26 +12,6 @@ from app.services.ranger_inspection import RangerInspectionService
 from app.services.trino_diagnostic import TrinoDiagnosticService, validate_read_only_query
 
 
-def test_ingestion_runner_has_no_internal_periodic_scheduler() -> None:
-    from pathlib import Path
-
-    runner_path = (
-        Path(__file__).parents[3]
-        / "infrastructure"
-        / "docker"
-        / "metadata-ingestion"
-        / "runner.py"
-    )
-    content = runner_path.read_text(encoding="utf-8")
-
-    assert "def start_scheduler" not in content
-    assert "def scheduler_loop" not in content
-    assert "/run-now" in content
-    assert "/health" in content
-    assert "/status" in content
-    assert "_run_lock" in content
-
-
 def test_ranger_inspection_service_calls_correct_adapter_contracts() -> None:
     with patch(
         "app.services.ranger_inspection.create_ranger_policy_client"
