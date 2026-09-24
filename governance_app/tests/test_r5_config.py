@@ -34,3 +34,23 @@ def test_legacy_trino_names_remain_accepted() -> None:
     assert settings.trino_readonly_schema == "crm"
     assert settings.trino_readonly_user == "diagnostic-reader"
     assert settings.trino_readonly_timeout_seconds == 17
+
+
+def test_trino_control_identity_configuration_is_separate() -> None:
+    settings = Settings.model_validate(
+        {
+            "app_env": "test",
+            "TRINO_READONLY_USER": "policy-user",
+            "TRINO_VERIFICATION_CONTROL_USER": "control-user",
+            "TRINO_VERIFICATION_CONTROL_PASSWORD": "control-secret",
+            "TRINO_VERIFICATION_SAMPLE_ROWS": 25,
+        }
+    )
+    assert settings.trino_readonly_user == "policy-user"
+    assert settings.trino_verification_control_user == "control-user"
+    assert settings.trino_verification_control_password is not None
+    assert (
+        settings.trino_verification_control_password.get_secret_value()
+        == "control-secret"
+    )
+    assert settings.trino_verification_sample_rows == 25
