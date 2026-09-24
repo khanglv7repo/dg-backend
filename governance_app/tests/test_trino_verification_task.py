@@ -120,3 +120,106 @@ def test_confirmed_verification_persists_runtime_evidence() -> None:
     assert projection.verification_status == "VERIFICATION_CONFIRMED"
     assert projection.verification_details["query_id"] == "q-1"
     db.commit.assert_called_once()
+
+
+def test_new_runtime_drift_emits_single_detected_audit() -> None:
+    projection = _projection()
+    projection.verification_status = "VERIFICATION_CONFIRMED"
+    version = _version()
+    db = MagicMock()
+    db.execute.return_value.all.return_value = [(projection, version)]
+
+    verifier = MagicMock()
+    verifier.verify.return_value = {
+        "status": "RUNTIME_DRIFT",
+        "observed": "ACCESS_DENIED",
+        "expected": "QUERY_SUCCESS",
+    }
+    audit = MagicMock()
+
+    with patch.object(
+        policy_task, "SessionLocal", return_value=_session_cm(db)
+    ), patch.object(
+        policy_task, "get_settings", return_value=_settings()
+    ), patch.object(
+        policy_task,
+        "PolicyRuntimeVerificationService",
+        return_value=verifier,
+    ), patch.object(
+        policy_task,
+        "AuditRepository",
+        return_value=audit,
+    ):
+        result = policy_task.verify_trino_policy_enforcement.run()
+
+    assert result["status"] == "RUNTIME_DRIFT"
+    audit.record.assert_called_once()
+    assert audit.record.call_args.kwargs["action"] == "RUNTIME_DRIFT_DETECTED"
+
+
+def test_persistent_runtime_drift_does_not_duplicate_audit() -> None:
+    projection = _projection()
+    projection.verification_status = "RUNTIME_DRIFT"
+    version = _version()
+    db = MagicMock()
+    db.execute.return_value.all.return_value = [(projection, version)]
+
+    verifier = MagicMock()
+    verifier.verify.return_value = {
+        "status": "RUNTIME_DRIFT",
+        "observed": "ACCESS_DENIED",
+        "expected": "QUERY_SUCCESS",
+    }
+    audit = MagicMock()
+
+    with patch.object(
+        policy_task, "SessionLocal", return_value=_session_cm(db)
+    ), patch.object(
+        policy_task, "get_settings", return_value=_settings()
+    ), patch.object(
+        policy_task,
+        "PolicyRuntimeVerificationService",
+        return_value=verifier,
+    ), patch.object(
+        policy_task,
+        "AuditRepository",
+        return_value=audit,
+    ):
+        policy_task.verify_trino_policy_enforcement.run()
+
+    audit.record.assert_not_called()
+
+
+def test_runtime_drift_resolution_emits_resolved_audit() -> None:
+    projection = _projection()
+    projection.verification_status = "RUNTIME_DRIFT"
+    version = _version()
+    db = MagicMock()
+    db.execute.return_value.all.return_value = [(projection, version)]
+
+    verifier = MagicMock()
+    verifier.verify.return_value = {
+        "status": "VERIFICATION_CONFIRMED",
+        "observed": "QUERY_SUCCESS",
+        "expected": "QUERY_SUCCESS",
+    }
+    audit = MagicMock()
+
+    with patch.object(
+        policy_task, "SessionLocal", return_value=_session_cm(db)
+    ), patch.object(
+        policy_task, "get_settings", return_value=_settings()
+    ), patch.object(
+        policy_task,
+        "PolicyRuntimeVerificationService",
+        return_value=verifier,
+    ), patch.object(
+        policy_task,
+        "AuditRepository",
+        return_value=audit,
+    ):
+        result = policy_task.verify_trino_policy_enforcement.run()
+
+    assert result["status"] == "VERIFICATION_CONFIRMED"
+    audit.record.assert_called_once()
+    assert audit.record.call_args.kwargs["action"] == "RUNTIME_DRIFT_RESOLVED"
