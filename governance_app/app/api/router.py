@@ -2,12 +2,10 @@ from fastapi import APIRouter
 
 from app.api.routes import (
     capabilities,
-    classification_runs,
     data_access_policies,
     dq,
     events,
     health,
-    jobs,
     openmetadata_events,
 )
 
@@ -32,21 +30,11 @@ api_router.include_router(
     prefix="/integrations/openmetadata",
     tags=["openmetadata-integrations"],
 )
-api_router.include_router(
-    classification_runs.router,
-    prefix="/classification-runs",
-    tags=["classification-runs"],
-)
 # R4 authoritative logical policy API.
 api_router.include_router(
     data_access_policies.router,
     prefix="/data-access-policies",
     tags=["data-access-policies"],
-)
-api_router.include_router(
-    jobs.router,
-    prefix="/jobs",
-    tags=["jobs"],
 )
 api_router.include_router(
     dq.router,
