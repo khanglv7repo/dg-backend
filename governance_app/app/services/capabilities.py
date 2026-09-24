@@ -75,6 +75,8 @@ class CapabilityService:
                     self.settings.trino_verification_control_user
                 ),
                 "row_filter": bool(self.settings.trino_verification_control_user),
+                "subject_scope": "DIRECT_USER_ONLY",
+                "group_only_policy_behavior": "VERIFICATION_UNAVAILABLE",
                 "insufficient_evidence_behavior": "VERIFICATION_UNAVAILABLE",
             },
             "identity_rule": (
