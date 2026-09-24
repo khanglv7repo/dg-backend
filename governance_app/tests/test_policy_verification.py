@@ -28,13 +28,25 @@ def policy(*, decision: str = "ALLOW", subject: str = "alice", with_mask: bool =
     )
 
 
-def settings(*, user: str = "alice", window: float = 50.0) -> Settings:
+def settings(
+    *,
+    user: str = "alice",
+    control_user: str | None = None,
+    window: float = 50.0,
+) -> Settings:
     return Settings(
         app_env="test",
         trino_readonly_enabled=True,
         trino_readonly_user=user,
+        trino_verification_control_user=control_user,
         eventual_consistency_window_seconds=window,
     )
+
+
+def mask_projection_key(column: str = "phone") -> str:
+    import hashlib
+
+    return f"hash:{hashlib.sha256(column.encode()).hexdigest()[:12]}"
 
 
 class FakeTrino:
@@ -95,10 +107,11 @@ def test_non_matching_persona_is_unavailable_not_drift() -> None:
     assert "not a direct USER subject" in str(plan.reason)
 
 
-def test_mask_and_row_filter_require_baseline_contract() -> None:
+def test_mask_and_row_filter_require_independent_control_identity() -> None:
     mask = build_verification_plan(
         logical_policy=policy(with_mask=True),
         projection_type="MASK",
+        projection_key=mask_projection_key(),
         verification_user="alice",
     )
     row_filter = build_verification_plan(
@@ -108,9 +121,9 @@ def test_mask_and_row_filter_require_baseline_contract() -> None:
     )
 
     assert mask.supported is False
-    assert "baseline" in str(mask.reason)
+    assert "CONTROL_USER" in str(mask.reason)
     assert row_filter.supported is False
-    assert "baseline" in str(row_filter.reason)
+    assert "CONTROL_USER" in str(row_filter.reason)
 
 
 def test_allow_success_is_confirmed() -> None:
@@ -189,3 +202,119 @@ def test_infrastructure_error_is_verification_error_not_drift() -> None:
 
     assert result["status"] == "VERIFICATION_ERROR"
     assert result["retryable"] is True
+
+
+def test_mask_hash_plan_uses_subject_and_control_queries() -> None:
+    plan = build_verification_plan(
+        logical_policy=policy(with_mask=True),
+        projection_type="MASK",
+        projection_key=mask_projection_key(),
+        verification_user="alice",
+        control_user="control",
+        sample_rows=5,
+    )
+
+    assert plan.supported is True
+    assert plan.expected == "MASK_HASH_MATCH"
+    assert 'CAST("phone" AS varchar)' in str(plan.sql)
+    assert "to_hex(sha256(to_utf8" in str(plan.control_sql)
+    assert "LIMIT 5" in str(plan.control_sql)
+
+
+def test_mask_hash_is_confirmed_against_control_transformation() -> None:
+    subject = FakeTrino(
+        result={
+            "query_id": "subject-q",
+            "rows": [["A1"], ["B2"]],
+        }
+    )
+    control = FakeTrino(
+        result={
+            "query_id": "control-q",
+            "rows": [["A1"], ["B2"]],
+        }
+    )
+    result = PolicyRuntimeVerificationService(
+        settings(control_user="control"),
+        trino_service=subject,
+        control_trino_service=control,
+    ).verify(
+        logical_policy=policy(with_mask=True),
+        projection_type="MASK",
+        projection_key=mask_projection_key(),
+        ranger_apply_timestamp=utcnow() - timedelta(seconds=100),
+    )
+
+    assert result["status"] == "VERIFICATION_CONFIRMED"
+    assert result["matches_expected"] is True
+    assert result["query_id"] == {
+        "subject": "subject-q",
+        "control": "control-q",
+    }
+
+
+def test_mask_hash_empty_control_sample_is_unavailable_not_drift() -> None:
+    result = PolicyRuntimeVerificationService(
+        settings(control_user="control", window=1),
+        trino_service=FakeTrino(result={"rows": [], "query_id": "s"}),
+        control_trino_service=FakeTrino(result={"rows": [], "query_id": "c"}),
+    ).verify(
+        logical_policy=policy(with_mask=True),
+        projection_type="MASK",
+        projection_key=mask_projection_key(),
+        ranger_apply_timestamp=utcnow() - timedelta(seconds=100),
+    )
+
+    assert result["status"] == "VERIFICATION_UNAVAILABLE"
+    assert "no non-null mask sample" in result["reason"]
+
+
+def test_row_filter_requires_control_rows_outside_filter() -> None:
+    result = PolicyRuntimeVerificationService(
+        settings(control_user="control", window=1),
+        trino_service=FakeTrino(result={"rows": [[0]], "query_id": "s"}),
+        control_trino_service=FakeTrino(result={"rows": [[0]], "query_id": "c"}),
+    ).verify(
+        logical_policy=policy(with_filter=True),
+        projection_type="ROW_FILTER",
+        projection_key="row-filter",
+        ranger_apply_timestamp=utcnow() - timedelta(seconds=100),
+    )
+
+    assert result["status"] == "VERIFICATION_UNAVAILABLE"
+    assert "cannot be distinguished from source data" in result["reason"]
+
+
+def test_row_filter_is_confirmed_when_control_sees_forbidden_rows() -> None:
+    result = PolicyRuntimeVerificationService(
+        settings(control_user="control", window=1),
+        trino_service=FakeTrino(result={"rows": [[0]], "query_id": "s"}),
+        control_trino_service=FakeTrino(result={"rows": [[7]], "query_id": "c"}),
+    ).verify(
+        logical_policy=policy(with_filter=True),
+        projection_type="ROW_FILTER",
+        projection_key="row-filter",
+        ranger_apply_timestamp=utcnow() - timedelta(seconds=100),
+    )
+
+    assert result["status"] == "VERIFICATION_CONFIRMED"
+    assert result["observed"] == {
+        "subject_violations": 0,
+        "control_violations": 7,
+    }
+
+
+def test_row_filter_violation_becomes_drift_after_window() -> None:
+    result = PolicyRuntimeVerificationService(
+        settings(control_user="control", window=1),
+        trino_service=FakeTrino(result={"rows": [[2]], "query_id": "s"}),
+        control_trino_service=FakeTrino(result={"rows": [[7]], "query_id": "c"}),
+    ).verify(
+        logical_policy=policy(with_filter=True),
+        projection_type="ROW_FILTER",
+        projection_key="row-filter",
+        ranger_apply_timestamp=utcnow() - timedelta(seconds=100),
+    )
+
+    assert result["status"] == "RUNTIME_DRIFT"
+    assert result["matches_expected"] is False
