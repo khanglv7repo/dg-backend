@@ -99,3 +99,17 @@ def test_trino_verification_disabled_marks_existing_projection_unavailable() -> 
     assert result["unavailable"] == 1
     assert projection.verification_status == "VERIFICATION_UNAVAILABLE"
     db.commit.assert_called_once()
+
+
+def test_backend_openmetadata_adapter_has_no_tag_write_capability() -> None:
+    from app.clients.openmetadata import OpenMetadataClient
+
+    forbidden = (
+        "apply_confirmed_tags",
+        "create_tag_suggestion",
+        "_merge_entity_tags",
+        "_merge_column_tags",
+        "_merge_confirmed_tag_labels",
+    )
+    for method_name in forbidden:
+        assert not hasattr(OpenMetadataClient, method_name), method_name
