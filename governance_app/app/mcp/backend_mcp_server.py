@@ -11,15 +11,12 @@ from fastmcp.exceptions import ToolError
 from app.core.config import Settings, get_settings
 from app.core.errors import (
     ConfigurationError,
-    ControlConfirmationError,
     ExternalSystemError,
     GovernanceError,
 )
 from app.db.session import SessionLocal
 from app.services.audit_query import AuditQueryService
-from app.services.classification_completion import ClassificationCompletionService
 from app.services.data_access_policy import DataAccessPolicyService
-from app.services.policy_lifecycle import PolicyLifecycleService
 from app.services.policy_query import PolicyQueryService
 from app.services.ranger_client_factory import build_resource_ranger_client
 from app.services.ranger_inspection import (
@@ -93,18 +90,6 @@ def _internal_tool_error() -> ToolError:
 
 def _result(value: Any) -> Any:
     return _safe(jsonable_encoder(value))
-
-
-def _confirmation(confirmed: bool, action: str) -> None:
-    if confirmed is not True:
-        raise ControlConfirmationError(
-            f"{action} requires confirmed=true before changing Backend authority",
-            details={
-                "action": action,
-                "confirmed": False,
-                "note": "confirmation is a workflow guard, not authentication",
-            },
-        )
 
 
 def _actor(settings: Settings) -> tuple[str, str]:
@@ -360,195 +345,6 @@ def create_policy_version(
             if reason:
                 result["request_reason"] = reason.strip()[:1000]
             return _result(result)
-    except GovernanceError as exc:
-        raise _tool_error(exc) from None
-    except Exception:
-        raise _internal_tool_error() from None
-
-
-@mcp.tool
-def activate_policy_version(
-    policy_key: str,
-    version: int,
-    confirmed: bool = False,
-    approval_reason: str | None = None,
-) -> dict[str, Any]:
-    """Activate one immutable R4 version after explicit MCP workflow confirmation."""
-
-    ranger = None
-    try:
-        _confirmation(confirmed, "activate_policy_version")
-        settings = get_settings()
-        actor_id, actor_name = _actor(settings)
-        ranger = build_resource_ranger_client(settings)
-        with SessionLocal() as db:
-            result = PolicyLifecycleService(
-                db,
-                settings,
-                ranger_client=ranger,
-            ).activate(
-                policy_key=policy_key,
-                version=version,
-                actor_id=actor_id,
-                actor_name=actor_name,
-            )
-            response = PolicyQueryService(db, settings).get_policy(
-                policy_key=policy_key,
-                version=result.version.version,
-            )
-            response.update(
-                {
-                    "authority_changed": result.authority_changed,
-                    "dispatched": result.dispatched,
-                    "task_id": result.task_id,
-                }
-            )
-            if approval_reason:
-                response["approval_reason"] = approval_reason.strip()[:1000]
-            return _result(response)
-    except GovernanceError as exc:
-        raise _tool_error(exc) from None
-    except Exception:
-        raise _internal_tool_error() from None
-    finally:
-        if ranger is not None:
-            ranger.close()
-
-
-@mcp.tool
-def rollback_policy(
-    policy_key: str,
-    target_version: int,
-    confirmed: bool = False,
-    reason: str | None = None,
-) -> dict[str, Any]:
-    """Reactivate the exact immutable target version; never infer a previous version."""
-
-    ranger = None
-    try:
-        _confirmation(confirmed, "rollback_policy")
-        settings = get_settings()
-        actor_id, actor_name = _actor(settings)
-        ranger = build_resource_ranger_client(settings)
-        with SessionLocal() as db:
-            result = PolicyLifecycleService(
-                db,
-                settings,
-                ranger_client=ranger,
-            ).rollback(
-                policy_key=policy_key,
-                target_version=target_version,
-                actor_id=actor_id,
-                actor_name=actor_name,
-            )
-            response = PolicyQueryService(db, settings).get_policy(
-                policy_key=policy_key,
-                version=result.version.version,
-            )
-            response.update(
-                {
-                    "authority_changed": result.authority_changed,
-                    "dispatched": result.dispatched,
-                    "task_id": result.task_id,
-                }
-            )
-            if reason:
-                response["reason"] = reason.strip()[:1000]
-            return _result(response)
-    except GovernanceError as exc:
-        raise _tool_error(exc) from None
-    except Exception:
-        raise _internal_tool_error() from None
-    finally:
-        if ranger is not None:
-            ranger.close()
-
-
-@mcp.tool
-def update_service_mapping(
-    om_service_name: str,
-    trino_catalog: str,
-    ranger_service_name: str,
-    environment: str,
-    confirmed: bool = False,
-    ranger_tag_service_name: str | None = None,
-    enabled: bool = True,
-    reason: str | None = None,
-) -> dict[str, Any]:
-    """Persist one explicit Backend mapping after confirmation; no fuzzy inference/Ranger write."""
-
-    try:
-        _confirmation(confirmed, "update_service_mapping")
-        settings = get_settings()
-        actor_id, actor_name = _actor(settings)
-        with SessionLocal() as db:
-            with db.begin():
-                mapping = ServiceMappingService(db).update(
-                    om_service_name=om_service_name,
-                    trino_catalog=trino_catalog,
-                    ranger_service_name=ranger_service_name,
-                    ranger_tag_service_name=ranger_tag_service_name,
-                    environment=environment,
-                    enabled=enabled,
-                    actor_id=actor_id,
-                    actor_name=actor_name,
-                    reason=reason,
-                )
-            mapping["authority_changed"] = True
-            mapping["ranger_mutation"] = False
-            mapping["reconciliation_enqueued"] = False
-            return _result(mapping)
-    except GovernanceError as exc:
-        raise _tool_error(exc) from None
-    except Exception:
-        raise _internal_tool_error() from None
-
-
-@mcp.tool
-def request_ranger_sync(policy_key: str) -> dict[str, Any]:
-    """Republish existing R4 reconciliation for the current ACTIVE policy only."""
-
-    try:
-        settings = get_settings()
-        with SessionLocal() as db:
-            return _result(
-                PolicyLifecycleService(db, settings).request_sync(
-                    policy_key=policy_key
-                )
-            )
-    except GovernanceError as exc:
-        raise _tool_error(exc) from None
-    except Exception:
-        raise _internal_tool_error() from None
-
-
-@mcp.tool
-def complete_classification_execution(
-    execution_id: str,
-    generation: int,
-    status: Literal["COMPLETED", "NO_PROPOSAL"],
-    result: dict[str, Any],
-) -> dict[str, Any]:
-    """Generation-fenced completion of one already-dispatched WAITING_AI execution.
-
-    This extends the frozen R5 MCP contract for R6-B. It does not create new
-    governance intent and therefore does not require confirmed=true.
-    """
-
-    try:
-        settings = get_settings()
-        actor_id, actor_name = _actor(settings)
-        with SessionLocal() as db:
-            with db.begin():
-                response = ClassificationCompletionService(db).complete(
-                    execution_id=execution_id,
-                    generation=generation,
-                    status=status,
-                    result=result,
-                    actor_id=actor_id,
-                    actor_name=actor_name,
-                )
-            return _result(response)
     except GovernanceError as exc:
         raise _tool_error(exc) from None
     except Exception:
