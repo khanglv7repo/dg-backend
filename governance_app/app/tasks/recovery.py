@@ -19,7 +19,6 @@ from app.models.event_inbox import EventInbox
 from app.repositories.audit import AuditRepository
 from app.repositories.event_inbox import EventInboxRepository
 from app.services.event_router import EventPurpose, EventPurposeRouter
-from app.tasks.classification import classify_entity
 from app.tasks.tag_sync import sync_tags_to_ranger
 
 logger = logging.getLogger(__name__)
@@ -79,21 +78,6 @@ def retry_unfinished_workflows() -> dict:
                 continue
 
             newly_dispatched: list[tuple[str, str]] = []
-            if EventPurpose.CLASSIFY.value in missing:
-                try:
-                    task_res = classify_entity.delay(
-                        event_id=record.event_id,
-                        entity_type=record.entity_type,
-                        entity_fqn=record.entity_fqn,
-                        correlation_id=record.correlation_id,
-                    )
-                    newly_dispatched.append((EventPurpose.CLASSIFY.value, str(task_res.id)))
-                except Exception:
-                    logger.exception(
-                        "recovery redispatch of classify_entity failed for event_id=%s",
-                        record.event_id,
-                    )
-
             if EventPurpose.TAG_SYNC.value in missing:
                 try:
                     task_res = sync_tags_to_ranger.delay(
