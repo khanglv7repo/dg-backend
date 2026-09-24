@@ -11,7 +11,7 @@ def _settings() -> Settings:
     return Settings(_env_file=None)
 
 
-def test_tag_change_enqueues_tag_sync_without_reclassification(session) -> None:
+def test_tag_change_enqueues_tag_sync(session) -> None:
     event = {
         "id": "evt-confirm-email",
         "eventType": "ENTITY_UPDATED",
@@ -23,35 +23,16 @@ def test_tag_change_enqueues_tag_sync_without_reclassification(session) -> None:
                 {
                     "name": "columns.email.tags",
                     "oldValue": [],
-                    "newValue": [
-                        {
-                            "tagFQN": "PII.Email",
-                            "state": "Confirmed",
-                        }
-                    ],
+                    "newValue": [{"tagFQN": "PII.Email", "state": "Confirmed"}],
                 }
             ]
         },
-        "entity": {
-            "name": "customers",
-            "columns": [
-                {
-                    "name": "email",
-                    "dataType": "VARCHAR",
-                }
-            ],
-        },
     }
 
-    with patch("app.services.openmetadata_event_adapter.sync_tags_to_ranger") as mock_tag_sync, \
-         patch("app.services.openmetadata_event_adapter.classify_entity") as mock_classify:
-
+    with patch("app.services.openmetadata_event_adapter.sync_tags_to_ranger") as mock_tag_sync:
         mock_tag_sync.delay.return_value.id = "task-tag-sync-1"
 
-        res = OpenMetadataEventAdapterService(
-            session,
-            _settings(),
-        ).process_change_event(event)
+        res = OpenMetadataEventAdapterService(session, _settings()).process_change_event(event)
 
         assert res["status"] == "accepted"
         assert res["purposes"] == [EventPurpose.TAG_SYNC.value]
@@ -60,10 +41,9 @@ def test_tag_change_enqueues_tag_sync_without_reclassification(session) -> None:
             entity_fqn="hive.sales.customers",
             correlation_id="om-event-evt-confirm-email",
         )
-        mock_classify.delay.assert_not_called()
 
 
-def test_non_tag_metadata_update_still_enqueues_classification(session) -> None:
+def test_non_tag_metadata_update_does_not_dispatch_backend_classification(session) -> None:
     event = {
         "id": "evt-description",
         "eventType": "ENTITY_UPDATED",
@@ -72,28 +52,15 @@ def test_non_tag_metadata_update_still_enqueues_classification(session) -> None:
         "timestamp": 456,
         "changeDescription": {
             "fieldsUpdated": [
-                {
-                    "name": "description",
-                    "oldValue": "old",
-                    "newValue": "new",
-                }
+                {"name": "description", "oldValue": "old", "newValue": "new"}
             ]
-        },
-        "entity": {
-            "name": "customers",
-            "description": "new",
-            "columns": [{"name": "email", "dataType": "VARCHAR"}],
         },
     }
 
-    with patch("app.services.openmetadata_event_adapter.classify_entity") as mock_classify:
-        mock_classify.delay.return_value.id = "task-classify-1"
-
-        res = OpenMetadataEventAdapterService(
-            session,
-            _settings(),
-        ).process_change_event(event)
+    with patch("app.services.openmetadata_event_adapter.sync_tags_to_ranger") as mock_tag_sync:
+        res = OpenMetadataEventAdapterService(session, _settings()).process_change_event(event)
 
         assert res["status"] == "accepted"
-        assert EventPurpose.CLASSIFY.value in res["purposes"]
-        mock_classify.delay.assert_called_once()
+        assert res["purposes"] == []
+        assert res["dispatched_tasks"] == []
+        mock_tag_sync.delay.assert_not_called()
