@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, status
 
 from app.api.dependencies import AppSettings, CurrentActor, DbSession
@@ -9,6 +11,7 @@ from app.services.dq_service import DQService
 from app.tasks.dq import materialize_approved_test_case
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 def _require_agent_or_operator(actor) -> None:
@@ -73,8 +76,17 @@ def approve_test_case(
         registry_id=registry_id,
         actor_id=actor.subject,
     )
-    task = materialize_approved_test_case.delay(registry_id=registry_id)
-    result["materialization_task_id"] = (
-        str(task.id) if getattr(task, "id", None) else None
-    )
+    try:
+        task = materialize_approved_test_case.delay(registry_id=registry_id)
+        result["materialization_task_id"] = (
+            str(task.id) if getattr(task, "id", None) else None
+        )
+    except Exception:
+        # Approval is already durably committed. The periodic DQ recovery task
+        # will redispatch any APPROVED row that has not been materialized.
+        logger.exception(
+            "DQ approval committed but materialization dispatch failed for %s",
+            registry_id,
+        )
+        result["materialization_task_id"] = None
     return DQTestCaseResponse.model_validate(result)
