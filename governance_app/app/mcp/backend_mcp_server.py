@@ -26,7 +26,6 @@ from app.services.ranger_inspection import (
 from app.services.service_mapping import ServiceMappingService
 from app.services.tag_sync_observability import TagSyncObservabilityService
 from app.services.trino_readonly import TrinoReadonlyService
-from app.services.workflow_query import WorkflowQueryService
 
 mcp = FastMCP("Data Governance Backend MCP", mask_error_details=True)
 
@@ -222,19 +221,6 @@ def get_ranger_sync_status(
                     version=version,
                 )
             )
-    except GovernanceError as exc:
-        raise _tool_error(exc) from None
-    except Exception:
-        raise _internal_tool_error() from None
-
-
-@mcp.tool
-def get_workflow_status(execution_id: str) -> dict[str, Any]:
-    """Read bounded durable workflow/execution status from existing Backend state."""
-
-    try:
-        with SessionLocal() as db:
-            return _result(WorkflowQueryService(db).get(execution_id))
     except GovernanceError as exc:
         raise _tool_error(exc) from None
     except Exception:
