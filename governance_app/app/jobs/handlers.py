@@ -8,7 +8,6 @@ from app.clients.ranger_tags import RangerTagStoreClient
 from app.core.config import Settings
 from app.core.errors import ConfigurationError
 from app.models.enums import JobType
-from app.services.asset_discovery import AssetDiscoveryService
 from app.services.policy_sync import (
     RangerPolicyCatalogSyncService,
     RangerTagAssignmentService,
@@ -103,45 +102,6 @@ def handle_reconcile_ranger(
     return handle_sync_ranger_tags(session, settings, payload)
 
 
-def handle_discover_unclassified_assets(
-    session: Session,
-    settings: Settings,
-    payload: dict,
-) -> dict:
-    client = (
-        _ingestion_openmetadata_client(settings)
-        if settings.openmetadata_enabled
-        else None
-    )
-    try:
-        return AssetDiscoveryService(
-            session,
-            settings,
-            client,
-        ).discover(
-            correlation_id=payload.get("correlation_id")
-        )
-    finally:
-        if client is not None:
-            client.close()
-
-
-def _ingestion_openmetadata_client(
-    settings: Settings,
-) -> OpenMetadataClient:
-    if not settings.openmetadata_enabled:
-        raise ConfigurationError("OpenMetadata integration is disabled")
-    return OpenMetadataClient(
-        base_url=settings.openmetadata_base_url,
-        token=(
-            settings.openmetadata_ingestion_bot_token.get_secret_value()
-            if settings.openmetadata_ingestion_bot_token
-            else None
-        ),
-        timeout=settings.openmetadata_timeout_seconds,
-    )
-
-
 def _auto_tag_openmetadata_client(
     settings: Settings,
 ) -> OpenMetadataClient:
@@ -197,5 +157,4 @@ HANDLERS = {
     JobType.SYNC_RANGER_POLICIES: handle_sync_ranger_policies,
     JobType.SYNC_RANGER_TAGS: handle_sync_ranger_tags,
     JobType.RECONCILE_RANGER: handle_reconcile_ranger,
-    JobType.DISCOVER_UNCLASSIFIED_ASSETS: handle_discover_unclassified_assets,
 }
