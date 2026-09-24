@@ -41,13 +41,7 @@ def upgrade() -> None:
         "ranger_policy_projection",
         sa.Column("last_verified_at", sa.DateTime(timezone=True), nullable=True),
     )
-    op.alter_column(
-        "ranger_policy_projection", "verification_status", server_default=None
-    )
-    op.alter_column(
-        "ranger_policy_projection", "verification_details", server_default=None
-    )
-
+    # Keep the server default for SQLite/PostgreSQL portability and safe\n    # out-of-ORM inserts; application defaults remain identical.\n    # Keep the server default for SQLite/PostgreSQL portability and safe\n    # out-of-ORM inserts; application defaults remain identical.\n
 
 def downgrade() -> None:
     op.drop_column("ranger_policy_projection", "last_verified_at")
