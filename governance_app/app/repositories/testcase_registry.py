@@ -61,7 +61,7 @@ class TestCaseRegistryRepository:
             target_entity_fqn=target_entity_fqn,
             test_definition_fqn=test_definition_fqn,
             stable_test_slot_id=stable_test_slot_id,
-            reservation_state="RESERVED",
+            reservation_state="NOT_STARTED",
             worker_id=worker_id,
             spec_payload=spec_payload,
         )
@@ -150,7 +150,7 @@ class TestCaseRegistryRepository:
         record = self.session.get(TestCaseRegistry, record_id)
         if record is None:
             raise ConflictError(f"testcase registry row {record_id!r} was not found")
-        if record.reservation_state not in {"RESERVED", "CONFIRMED"}:
+        if record.reservation_state not in {"NOT_STARTED", "RESERVED", "CONFIRMED"}:
             raise ConflictError(
                 f"testcase {record_id!r} cannot be approved while reservation_state="
                 f"{record.reservation_state!r}"
@@ -163,6 +163,8 @@ class TestCaseRegistryRepository:
                 f"{record.lifecycle_state!r} to APPROVED"
             )
         record.lifecycle_state = "APPROVED"
+        if record.reservation_state == "NOT_STARTED":
+            record.reservation_state = "RESERVED"
         record.approved_at = utcnow()
         record.approved_by = actor_id
         self.session.flush()
