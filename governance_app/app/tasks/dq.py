@@ -150,9 +150,7 @@ def run_executable_test_case(
                 )
 
             state = service.get(registry_id=registry_id)
-            table_fqn = str(
-                service.registry.get(service._uuid(registry_id)).target_entity_fqn
-            )
+            table_fqn = str(state.get("target_entity_fqn") or "")
             test_suite_fqn = str(state.get("om_test_suite_fqn") or "")
             test_case_name = str(state.get("natural_key_hash") or "")
             if not table_fqn or not test_suite_fqn or not test_case_name:
