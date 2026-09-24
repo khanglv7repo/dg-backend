@@ -362,6 +362,7 @@ class DQService:
                 str(record.active_run_id) if record.active_run_id else None
             ),
             "run_status": record.last_run_status,
+            "run_queued_at": record.last_run_queued_at,
             "run_started_at": record.last_run_started_at,
             "run_finished_at": record.last_run_finished_at,
             "run_requested_by": record.last_run_requested_by,
