@@ -365,3 +365,29 @@ def test_row_filter_plan_is_bounded_to_one_violation() -> None:
     assert plan.supported is True
     assert "WHERE NOT (region = 'VN')" in str(plan.sql)
     assert str(plan.sql).endswith("LIMIT 1")
+
+
+def test_group_only_policy_is_explicitly_unavailable_for_automatic_verification() -> None:
+    logical = LogicalDataAccessPolicy.model_validate(
+        {
+            "subjects": [{"type": "GROUP", "name": "pii_readers"}],
+            "resource": {
+                "catalog": "dev",
+                "schema": "sales",
+                "table": "customer",
+            },
+            "access": {"select": "ALLOW"},
+            "masks": {},
+            "row_filter": None,
+        }
+    )
+
+    plan = build_verification_plan(
+        logical_policy=logical,
+        projection_type="ACCESS",
+        verification_user="governance-policy-verifier-bot",
+    )
+
+    assert plan.supported is False
+    assert plan.expected is None
+    assert "not a direct USER subject" in str(plan.reason)
