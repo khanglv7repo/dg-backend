@@ -105,6 +105,7 @@ def _mask_control_sql(
     col = _quoted_identifier(column)
     return (
         "SELECT DISTINCT "
+        f"typeof({col}) AS source_type, "
         f"to_hex(sha256(to_utf8(CAST({col} AS varchar)))) "
         "AS verification_value "
         f"FROM {table} WHERE {col} IS NOT NULL "
@@ -294,6 +295,38 @@ def _first_column_values(result: dict[str, Any]) -> list[str]:
     return values
 
 
+def _mask_control_evidence(
+    result: dict[str, Any],
+) -> tuple[str | None, list[str]]:
+    rows = result.get("rows") if isinstance(result, dict) else None
+    if not isinstance(rows, list):
+        return None, []
+    source_type: str | None = None
+    values: list[str] = []
+    for row in rows:
+        if not isinstance(row, list) or len(row) < 2:
+            continue
+        observed_type = str(row[0]).strip().lower()
+        if source_type is None:
+            source_type = observed_type
+        elif source_type != observed_type:
+            return None, []
+        values.append(str(row[1]))
+    return source_type, values
+
+
+def _mask_type_is_character(source_type: str | None) -> bool:
+    if not source_type:
+        return False
+    normalized = source_type.lower().replace(" ", "")
+    return (
+        normalized == "varchar"
+        or normalized.startswith("varchar(")
+        or normalized == "char"
+        or normalized.startswith("char(")
+    )
+
+
 def _scalar_int(result: dict[str, Any]) -> int | None:
     rows = result.get("rows") if isinstance(result, dict) else None
     if not isinstance(rows, list) or not rows:
@@ -393,15 +426,26 @@ class PolicyRuntimeVerificationService:
 
         if projection_type == "MASK":
             observed_values = _first_column_values(subject_result)
-            expected_values = _first_column_values(control_result)
+            source_type, expected_values = _mask_control_evidence(control_result)
             if not expected_values:
                 return {
                     **base,
                     "status": "VERIFICATION_UNAVAILABLE",
                     "reason": "control identity returned no non-null mask sample values",
                 }
+            if not _mask_type_is_character(source_type):
+                return {
+                    **base,
+                    "status": "VERIFICATION_UNAVAILABLE",
+                    "reason": (
+                        "MASK_HASH runtime verification is currently deterministic "
+                        "only for character columns"
+                    ),
+                    "observed": {"source_type": source_type},
+                }
             matches = observed_values == expected_values
             observed: Any = {
+                "source_type": source_type,
                 "subject_values": observed_values,
                 "control_expected_values": expected_values,
             }
