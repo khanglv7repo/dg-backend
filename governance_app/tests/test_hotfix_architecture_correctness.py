@@ -113,3 +113,11 @@ def test_backend_openmetadata_adapter_has_no_tag_write_capability() -> None:
     )
     for method_name in forbidden:
         assert not hasattr(OpenMetadataClient, method_name), method_name
+
+
+def test_legacy_jobs_and_classification_routes_are_not_exposed() -> None:
+    from app.api.router import api_router
+
+    paths = {route.path for route in api_router.routes}
+    assert not any(path.startswith("/jobs") for path in paths)
+    assert not any(path.startswith("/classification-runs") for path in paths)
