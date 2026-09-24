@@ -65,7 +65,6 @@ app.conf.update(
 )
 
 app.conf.imports = (
-    "app.tasks.discovery",
     "app.tasks.dq",
     "app.tasks.ingestion",
     "app.tasks.outbox",
