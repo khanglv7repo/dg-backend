@@ -116,8 +116,8 @@ def _mask_control_sql(
 def _row_filter_sql(policy: LogicalDataAccessPolicy) -> str:
     expression = policy.row_filter or ""
     return (
-        "SELECT count(*) AS verification_violations "
-        f"FROM {_table_sql(policy)} WHERE NOT ({expression})"
+        "SELECT 1 AS verification_violation "
+        f"FROM {_table_sql(policy)} WHERE NOT ({expression}) LIMIT 1"
     )
 
 
@@ -327,17 +327,11 @@ def _mask_type_is_character(source_type: str | None) -> bool:
     )
 
 
-def _scalar_int(result: dict[str, Any]) -> int | None:
+def _has_rows(result: dict[str, Any]) -> bool | None:
     rows = result.get("rows") if isinstance(result, dict) else None
-    if not isinstance(rows, list) or not rows:
+    if not isinstance(rows, list):
         return None
-    row = rows[0]
-    if not isinstance(row, list) or not row:
-        return None
-    try:
-        return int(row[0])
-    except (TypeError, ValueError):
-        return None
+    return bool(rows)
 
 
 class PolicyRuntimeVerificationService:
@@ -454,16 +448,16 @@ class PolicyRuntimeVerificationService:
                 "control": control_result.get("query_id"),
             }
         elif projection_type == "ROW_FILTER":
-            subject_violations = _scalar_int(subject_result)
-            control_violations = _scalar_int(control_result)
-            if subject_violations is None or control_violations is None:
+            subject_has_violation = _has_rows(subject_result)
+            control_has_violation = _has_rows(control_result)
+            if subject_has_violation is None or control_has_violation is None:
                 return {
                     **base,
                     "status": "VERIFICATION_ERROR",
-                    "reason": "row-filter verification query returned an invalid count",
+                    "reason": "row-filter verification query returned invalid rows",
                     "retryable": False,
                 }
-            if control_violations <= 0:
+            if not control_has_violation:
                 return {
                     **base,
                     "status": "VERIFICATION_UNAVAILABLE",
@@ -472,14 +466,14 @@ class PolicyRuntimeVerificationService:
                         "enforcement cannot be distinguished from source data"
                     ),
                     "observed": {
-                        "subject_violations": subject_violations,
-                        "control_violations": control_violations,
+                        "subject_has_violation": subject_has_violation,
+                        "control_has_violation": control_has_violation,
                     },
                 }
-            matches = subject_violations == 0
+            matches = not subject_has_violation
             observed = {
-                "subject_violations": subject_violations,
-                "control_violations": control_violations,
+                "subject_has_violation": subject_has_violation,
+                "control_has_violation": control_has_violation,
             }
             query_ids = {
                 "subject": subject_result.get("query_id"),
