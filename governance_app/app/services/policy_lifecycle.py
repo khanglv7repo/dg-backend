@@ -98,25 +98,28 @@ class PolicyLifecycleService:
                 correlation_id=correlation_id,
             )
             version_id = str(selected.id)
-            EventOutboxRepository(self.session).enqueue(
-                aggregate_type="data_access_policy",
-                aggregate_id=str(selected.policy_key),
-                event_type="policy.version.activated",
-                payload={
-                    "policy_key": str(selected.policy_key),
-                    "policy_version_id": version_id,
-                    "version": int(selected.version),
-                    "actor_id": actor_id,
-                    "correlation_id": correlation_id,
-                },
-            )
+            if changed:
+                EventOutboxRepository(self.session).enqueue(
+                    aggregate_type="data_access_policy",
+                    aggregate_id=str(selected.policy_key),
+                    event_type="policy.version.activated",
+                    payload={
+                        "policy_key": str(selected.policy_key),
+                        "policy_version_id": version_id,
+                        "version": int(selected.version),
+                        "actor_id": actor_id,
+                        "correlation_id": correlation_id,
+                    },
+                )
 
-        task_id = self.dispatcher(version_id, correlation_id)
+        # Transactional Outbox is the single publish path. The API reports
+        # durable acceptance here; the dispatcher later flips the Outbox row
+        # to DISPATCHED only after Celery accepts sync_policy_to_ranger.
         return PolicyLifecycleResult(
             version=selected,
             authority_changed=bool(changed),
-            dispatched=True,
-            task_id=task_id,
+            dispatched=False,
+            task_id=None,
         )
 
     def rollback(
@@ -157,25 +160,25 @@ class PolicyLifecycleService:
             )
             version_id = str(selected.id)
             # Enqueue outbox row atomically with the rollback authority write.
-            EventOutboxRepository(self.session).enqueue(
-                aggregate_type="data_access_policy",
-                aggregate_id=str(selected.policy_key),
-                event_type="policy.version.rolled_back",
-                payload={
-                    "policy_key": str(selected.policy_key),
-                    "policy_version_id": version_id,
-                    "version": int(selected.version),
-                    "actor_id": actor_id,
-                    "correlation_id": correlation_id,
-                },
-            )
+            if changed:
+                EventOutboxRepository(self.session).enqueue(
+                    aggregate_type="data_access_policy",
+                    aggregate_id=str(selected.policy_key),
+                    event_type="policy.version.rolled_back",
+                    payload={
+                        "policy_key": str(selected.policy_key),
+                        "policy_version_id": version_id,
+                        "version": int(selected.version),
+                        "actor_id": actor_id,
+                        "correlation_id": correlation_id,
+                    },
+                )
 
-        task_id = self.dispatcher(version_id, correlation_id)
         return PolicyLifecycleResult(
             version=selected,
             authority_changed=bool(changed),
-            dispatched=True,
-            task_id=task_id,
+            dispatched=False,
+            task_id=None,
         )
 
     def _ranger(self) -> RangerClient:
