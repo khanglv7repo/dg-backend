@@ -2,9 +2,7 @@ from fastapi import APIRouter
 
 from app.api.routes import (
     capabilities,
-    classification_rules,
     classification_runs,
-    classifications,
     data_access_policies,
     dq,
     events,
@@ -34,16 +32,6 @@ api_router.include_router(
     openmetadata_events.router,
     prefix="/integrations/openmetadata",
     tags=["openmetadata-integrations"],
-)
-api_router.include_router(
-    classifications.router,
-    prefix="/classifications",
-    tags=["classifications"],
-)
-api_router.include_router(
-    classification_rules.router,
-    prefix="/classification-rules",
-    tags=["classification-rules"],
 )
 api_router.include_router(
     classification_runs.router,
