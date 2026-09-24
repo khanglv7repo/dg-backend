@@ -44,14 +44,20 @@ def test_outbox_unknown_event_fails_instead_of_being_marked_delivered() -> None:
         outbox_task._publish(record)
 
 
-def test_trino_verification_disabled_marks_synchronized_projection_unavailable() -> None:
-    db = MagicMock()
-    db.scalars.return_value = []
-    session_cm = MagicMock()
-    session_cm.__enter__.return_value = db
-    session_cm.__exit__.return_value = False
+def _session_cm(db):
+    cm = MagicMock()
+    cm.__enter__.return_value = db
+    cm.__exit__.return_value = False
+    return cm
 
-    with patch.object(policy_task, "SessionLocal", return_value=session_cm), patch.object(
+
+def test_trino_verification_disabled_with_no_projection_returns_no_projections() -> None:
+    db = MagicMock()
+    db.execute.return_value.all.return_value = []
+
+    with patch.object(
+        policy_task, "SessionLocal", return_value=_session_cm(db)
+    ), patch.object(
         policy_task,
         "get_settings",
         return_value=MagicMock(
@@ -66,19 +72,19 @@ def test_trino_verification_disabled_marks_synchronized_projection_unavailable()
     assert result["unavailable"] == 0
 
 
-def test_trino_verification_disabled_never_reports_drift_for_existing_projection() -> None:
+def test_trino_verification_disabled_marks_existing_projection_unavailable() -> None:
     projection = SimpleNamespace(
         verification_status="UNVERIFIED",
         verification_details={},
         last_verified_at=None,
     )
+    version = SimpleNamespace()
     db = MagicMock()
-    db.scalars.return_value = [projection]
-    session_cm = MagicMock()
-    session_cm.__enter__.return_value = db
-    session_cm.__exit__.return_value = False
+    db.execute.return_value.all.return_value = [(projection, version)]
 
-    with patch.object(policy_task, "SessionLocal", return_value=session_cm), patch.object(
+    with patch.object(
+        policy_task, "SessionLocal", return_value=_session_cm(db)
+    ), patch.object(
         policy_task,
         "get_settings",
         return_value=MagicMock(
@@ -92,3 +98,4 @@ def test_trino_verification_disabled_never_reports_drift_for_existing_projection
     assert result["drift"] == 0
     assert result["unavailable"] == 1
     assert projection.verification_status == "VERIFICATION_UNAVAILABLE"
+    db.commit.assert_called_once()
