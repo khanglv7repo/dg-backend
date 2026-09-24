@@ -191,6 +191,7 @@ class TestCaseRegistryRepository:
         record.run_generation = int(record.run_generation or 0) + 1
         record.active_run_id = run_id
         record.last_run_status = "QUEUED"
+        record.last_run_queued_at = utcnow()
         record.last_run_started_at = None
         record.last_run_finished_at = None
         record.last_run_requested_by = actor_id
@@ -264,3 +265,32 @@ class TestCaseRegistryRepository:
         record.last_run_error = error[:4000]
         self.session.flush()
         return record
+
+
+    def run_recovery_candidates(
+        self,
+        *,
+        queued_stale_after_seconds: int,
+        running_stale_after_seconds: int,
+    ) -> list[TestCaseRegistry]:
+        now_ts = utcnow().timestamp()
+        rows = list(
+            self.session.query(TestCaseRegistry)
+            .filter(TestCaseRegistry.last_run_status.in_(["QUEUED", "RUNNING"]))
+            .filter(TestCaseRegistry.active_run_id.isnot(None))
+            .all()
+        )
+        candidates: list[TestCaseRegistry] = []
+        for row in rows:
+            if row.last_run_status == "QUEUED":
+                timestamp = row.last_run_queued_at
+                threshold = queued_stale_after_seconds
+            else:
+                timestamp = row.last_run_started_at
+                threshold = running_stale_after_seconds
+            if timestamp is None:
+                candidates.append(row)
+                continue
+            if now_ts - timestamp.timestamp() >= threshold:
+                candidates.append(row)
+        return candidates
