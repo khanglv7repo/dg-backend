@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-from datetime import datetime
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -13,7 +12,6 @@ from app.models.job import utcnow
 from app.repositories.data_access_policy import DataAccessPolicyRepository
 from app.schemas.data_access_policy import LogicalDataAccessPolicy
 from app.services.policy_compiler import CompiledProjection, PolicyCompiler
-from app.services.trino_readonly import TrinoReadonlyService
 
 
 class PolicyReconciliationService:
@@ -25,14 +23,12 @@ class PolicyReconciliationService:
         settings: Settings,
         *,
         ranger_client: RangerClient,
-        trino_service: TrinoReadonlyService | None = None,
     ) -> None:
         self.session = session
         self.settings = settings
         self.ranger = ranger_client
         self.repository = DataAccessPolicyRepository(session)
         self.compiler = PolicyCompiler(ranger_service_name=settings.ranger_service_name)
-        self.trino_service = trino_service
 
     def reconcile(
         self,
@@ -383,43 +379,6 @@ class PolicyReconciliationService:
             "status": "RETIRED",
             "action": action,
             "mutated": action in {"CREATE", "UPDATE", "DISABLE"},
-        }
-
-    def verify_trino_enforcement(
-        self,
-        *,
-        ranger_apply_timestamp: datetime,
-        check: Any,
-    ) -> dict[str, Any]:
-        """Classify Ranger->Trino propagation state using the D1-derived
-        eventual_consistency_window (docs/13_IMPLEMENTATION_SPEC.md section 2/7,
-        planning/evidence/TASK-06/). `check` is a zero-arg callable that runs the
-        read-only Trino verification query and returns True if the expected
-        enforcement (mask/deny/row-filter) is observed.
-
-        Desired State -> Apply -> Actual State -> Read-back -> Compare ->
-        Reconcile (Hard Invariant #14): a successful Ranger Apply call alone is
-        never treated as converged; only an observed Trino read-back counts.
-
-        Returns one of:
-          - VERIFICATION_CONFIRMED: Trino already enforces as desired.
-          - VERIFICATION_PENDING: not yet enforced, but still within the normal
-            propagation window (not an incident).
-          - RUNTIME_DRIFT: window elapsed and enforcement still not observed --
-            a real anomaly, not normal propagation delay.
-        """
-        enforced = bool(check())
-        elapsed_seconds = (utcnow() - ranger_apply_timestamp).total_seconds()
-        if enforced:
-            status = "VERIFICATION_CONFIRMED"
-        elif elapsed_seconds <= self.settings.eventual_consistency_window_seconds:
-            status = "VERIFICATION_PENDING"
-        else:
-            status = "RUNTIME_DRIFT"
-        return {
-            "status": status,
-            "elapsed_seconds": elapsed_seconds,
-            "eventual_consistency_window_seconds": self.settings.eventual_consistency_window_seconds,
         }
 
     def _still_active(self, version_id, policy_key: str) -> bool:
