@@ -1,9 +1,5 @@
-from pathlib import Path
-from unittest.mock import MagicMock
 
 from app.core.config import Settings
-from app.models.enums import JobType
-from app.repositories.jobs import JobRepository
 from app.services.policy_catalog import PolicyCatalogService
 
 
