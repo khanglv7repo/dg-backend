@@ -272,8 +272,8 @@ def test_mask_hash_empty_control_sample_is_unavailable_not_drift() -> None:
 def test_row_filter_requires_control_rows_outside_filter() -> None:
     result = PolicyRuntimeVerificationService(
         settings(control_user="control", window=1),
-        trino_service=FakeTrino(result={"rows": [[0]], "query_id": "s"}),
-        control_trino_service=FakeTrino(result={"rows": [[0]], "query_id": "c"}),
+        trino_service=FakeTrino(result={"rows": [], "query_id": "s"}),
+        control_trino_service=FakeTrino(result={"rows": [], "query_id": "c"}),
     ).verify(
         logical_policy=policy(with_filter=True),
         projection_type="ROW_FILTER",
@@ -288,8 +288,8 @@ def test_row_filter_requires_control_rows_outside_filter() -> None:
 def test_row_filter_is_confirmed_when_control_sees_forbidden_rows() -> None:
     result = PolicyRuntimeVerificationService(
         settings(control_user="control", window=1),
-        trino_service=FakeTrino(result={"rows": [[0]], "query_id": "s"}),
-        control_trino_service=FakeTrino(result={"rows": [[7]], "query_id": "c"}),
+        trino_service=FakeTrino(result={"rows": [], "query_id": "s"}),
+        control_trino_service=FakeTrino(result={"rows": [[1]], "query_id": "c"}),
     ).verify(
         logical_policy=policy(with_filter=True),
         projection_type="ROW_FILTER",
@@ -299,16 +299,16 @@ def test_row_filter_is_confirmed_when_control_sees_forbidden_rows() -> None:
 
     assert result["status"] == "VERIFICATION_CONFIRMED"
     assert result["observed"] == {
-        "subject_violations": 0,
-        "control_violations": 7,
+        "subject_has_violation": False,
+        "control_has_violation": True,
     }
 
 
 def test_row_filter_violation_becomes_drift_after_window() -> None:
     result = PolicyRuntimeVerificationService(
         settings(control_user="control", window=1),
-        trino_service=FakeTrino(result={"rows": [[2]], "query_id": "s"}),
-        control_trino_service=FakeTrino(result={"rows": [[7]], "query_id": "c"}),
+        trino_service=FakeTrino(result={"rows": [[1]], "query_id": "s"}),
+        control_trino_service=FakeTrino(result={"rows": [[1]], "query_id": "c"}),
     ).verify(
         logical_policy=policy(with_filter=True),
         projection_type="ROW_FILTER",
@@ -351,3 +351,17 @@ def test_mask_hash_non_character_column_is_unavailable() -> None:
 
     assert result["status"] == "VERIFICATION_UNAVAILABLE"
     assert "character columns" in result["reason"]
+
+
+def test_row_filter_plan_is_bounded_to_one_violation() -> None:
+    plan = build_verification_plan(
+        logical_policy=policy(with_filter=True),
+        projection_type="ROW_FILTER",
+        projection_key="row-filter",
+        verification_user="alice",
+        control_user="control",
+    )
+
+    assert plan.supported is True
+    assert "WHERE NOT (region = 'VN')" in str(plan.sql)
+    assert str(plan.sql).endswith("LIMIT 1")
