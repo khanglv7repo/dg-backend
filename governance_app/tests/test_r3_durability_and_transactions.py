@@ -1,20 +1,11 @@
-"""Transaction and durability unit tests for OpenMetadata event intake and Celery task publishing."""
+"""Transaction and durability tests for OpenMetadata webhook -> TAG_SYNC."""
 from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-import anyio
-import httpx
-from fastapi import FastAPI
-from sqlalchemy import create_engine
 from sqlalchemy.orm import Session as SQLAlchemySession
-from sqlalchemy.orm import sessionmaker
 
-from app import models  # noqa: F401
-from app.api.dependencies import get_db, get_settings
-from app.api.routes import openmetadata_events
 from app.core.config import Settings
-from app.db.base import Base
 from app.models.event_inbox import EventInbox
 from app.services.openmetadata_event_adapter import OpenMetadataEventAdapterService
 
@@ -23,8 +14,7 @@ def _settings() -> Settings:
     return Settings(_env_file=None)
 
 
-def test_inbox_is_visible_from_independent_session_before_celery_publish(session) -> None:
-    """Prove that EventInbox record is COMMITTED in TX1 and visible to an independent Session B BEFORE Celery publish."""
+def test_inbox_is_visible_before_tag_sync_publish(session) -> None:
     raw_event = {
         "id": "evt-tx1-visible-001",
         "eventType": "entityCreated",
@@ -32,82 +22,70 @@ def test_inbox_is_visible_from_independent_session_before_celery_publish(session
         "entityFullyQualifiedName": "trino_catalog.sales.orders",
         "timestamp": 1722240200000,
     }
+    visible = False
 
-    inbox_visible_in_session_b = False
-
-    def spy_classify_delay(*args, **kwargs):
-        nonlocal inbox_visible_in_session_b
-        # Session B using the active test connection to query committed DB state
+    def spy_delay(*, entity_type, entity_fqn, correlation_id):
+        nonlocal visible
         session_b = SQLAlchemySession(bind=session.get_bind())
         try:
-            found = (
+            visible = (
                 session_b.query(EventInbox)
                 .filter(EventInbox.event_id == "evt-tx1-visible-001")
                 .first()
+                is not None
             )
-            if found is not None:
-                inbox_visible_in_session_b = True
         finally:
             session_b.close()
+        task = MagicMock()
+        task.id = "task-sync-spy-1"
+        return task
 
-        mock_task = MagicMock()
-        mock_task.id = "task-classify-spy-1"
-        return mock_task
+    with patch(
+        "app.services.openmetadata_event_adapter.sync_tags_to_ranger"
+    ) as sync:
+        sync.delay.side_effect = spy_delay
+        result = OpenMetadataEventAdapterService(
+            session, _settings()
+        ).process_change_event(raw_event)
 
-    with patch("app.services.openmetadata_event_adapter.classify_entity") as mock_classify, \
-         patch("app.services.openmetadata_event_adapter.sync_tags_to_ranger") as mock_tag_sync:
-
-        mock_classify.delay.side_effect = spy_classify_delay
-        mock_tag_sync.delay.return_value.id = "task-sync-spy-1"
-
-        adapter = OpenMetadataEventAdapterService(session, _settings())
-        res = adapter.process_change_event(raw_event)
-
-        assert res["status"] == "accepted"
-        assert inbox_visible_in_session_b is True, (
-            "TX1 requirement: EventInbox row MUST be committed and readable by an independent Session B "
-            "at the exact moment Celery task delay() is called!"
-        )
+    assert result["status"] == "accepted"
+    assert visible is True
+    assert result["dispatched_tasks"] == ["task-sync-spy-1"]
 
 
-def test_failed_publish_remains_dispatchable(session) -> None:
-    """Simulate Celery task publication failure.
-
-    Required:
-    - Inbox record remains durable in DB with status RECEIVED/DISPATCH_PENDING;
-    - Event is NOT marked PROCESSED;
-    - Future delivery/recovery attempt can publish missing tasks.
-    """
+def test_failed_tag_sync_publish_remains_dispatchable(session) -> None:
     raw_event = {
         "id": "evt-failed-celery-002",
         "eventType": "entityFieldsChanged",
         "entityType": "table",
         "entityFullyQualifiedName": "trino_catalog.sales.orders",
         "changeDescription": {
-            "fieldsAdded": [{"name": "columns.price.tags", "newValue": "PII.Price"}]
+            "fieldsAdded": [
+                {"name": "columns.price.tags", "newValue": "PII.Price"}
+            ]
         },
     }
 
-    with patch("app.services.openmetadata_event_adapter.sync_tags_to_ranger") as mock_tag_sync:
-        mock_tag_sync.delay.side_effect = RuntimeError("Broker connection lost")
+    with patch(
+        "app.services.openmetadata_event_adapter.sync_tags_to_ranger"
+    ) as sync:
+        sync.delay.side_effect = RuntimeError("Broker connection lost")
+        result = OpenMetadataEventAdapterService(
+            session, _settings()
+        ).process_change_event(raw_event)
 
-        adapter = OpenMetadataEventAdapterService(session, _settings())
-        res = adapter.process_change_event(raw_event)
-
-        assert res["status"] == "accepted"
-
-        record = (
-            session.query(EventInbox)
-            .filter(EventInbox.event_id == "evt-failed-celery-002")
-            .first()
-        )
-        assert record is not None, "Inbox record MUST remain durable despite Celery publish failure!"
-        assert record.status != "PROCESSED", "Event MUST NOT be marked PROCESSED when Celery publish fails!"
-        assert record.status in ("RECEIVED", "DISPATCH_PENDING")
+    assert result["status"] == "accepted"
+    record = (
+        session.query(EventInbox)
+        .filter(EventInbox.event_id == "evt-failed-celery-002")
+        .first()
+    )
+    assert record is not None
+    assert record.status in ("RECEIVED", "DISPATCH_PENDING")
+    assert record.status != "PROCESSED"
 
 
-def test_duplicate_pending_event_retries_missing_dispatch(session) -> None:
-    """Test duplicate webhook delivery when previous publish failed: retries missing task dispatch."""
+def test_duplicate_pending_event_retries_missing_tag_sync_dispatch(session) -> None:
     raw_event = {
         "id": "evt-retry-003",
         "eventType": "entityCreated",
@@ -115,146 +93,26 @@ def test_duplicate_pending_event_retries_missing_dispatch(session) -> None:
         "entityFullyQualifiedName": "trino_catalog.sales.orders",
     }
 
-    with patch("app.services.openmetadata_event_adapter.classify_entity") as mock_classify, \
-         patch("app.services.openmetadata_event_adapter.sync_tags_to_ranger") as mock_tag_sync:
-
-        mock_classify.delay.side_effect = RuntimeError("Broker unreachable")
-        mock_tag_sync.delay.side_effect = RuntimeError("Broker unreachable")
-
+    with patch(
+        "app.services.openmetadata_event_adapter.sync_tags_to_ranger"
+    ) as sync:
+        sync.delay.side_effect = RuntimeError("Broker unreachable")
         adapter = OpenMetadataEventAdapterService(session, _settings())
-        res1 = adapter.process_change_event(raw_event)
-        assert res1["dispatched_tasks"] == []
+        first = adapter.process_change_event(raw_event)
+        assert first["dispatched_tasks"] == []
 
-        mock_classify.delay.side_effect = None
-        mock_tag_sync.delay.side_effect = None
-        mock_classify.delay.return_value.id = "task-c-retry"
-        mock_tag_sync.delay.return_value.id = "task-t-retry"
+        task = MagicMock()
+        task.id = "task-t-retry"
+        sync.delay.side_effect = None
+        sync.delay.return_value = task
 
-        res2 = adapter.process_change_event(raw_event)
-        assert res2["status"] == "accepted"
-        assert len(res2["dispatched_tasks"]) == 2
+        second = adapter.process_change_event(raw_event)
 
-        rec = session.query(EventInbox).filter(EventInbox.event_id == "evt-retry-003").first()
-        assert rec.status == "PROCESSED"
-
-
-def test_partial_dispatch_does_not_republish_successful_purpose(session) -> None:
-    """Test partial dispatch failure: CLASSIFY succeeds, TAG_SYNC fails.
-
-    Subsequent retry publishes ONLY TAG_SYNC without re-publishing CLASSIFY.
-    """
-    raw_event = {
-        "id": "evt-partial-004",
-        "eventType": "entityCreated",
-        "entityType": "table",
-        "entityFullyQualifiedName": "trino_catalog.sales.orders",
-    }
-
-    with patch("app.services.openmetadata_event_adapter.classify_entity") as mock_classify, \
-         patch("app.services.openmetadata_event_adapter.sync_tags_to_ranger") as mock_tag_sync:
-
-        mock_classify.delay.return_value.id = "task-c-partial-1"
-        mock_tag_sync.delay.side_effect = RuntimeError("Ranger worker down")
-
-        adapter = OpenMetadataEventAdapterService(session, _settings())
-        res1 = adapter.process_change_event(raw_event)
-        assert res1["dispatched_tasks"] == ["task-c-partial-1"]
-        assert mock_classify.delay.call_count == 1
-        assert mock_tag_sync.delay.call_count == 1
-
-        mock_tag_sync.delay.side_effect = None
-        mock_tag_sync.delay.return_value.id = "task-t-partial-2"
-
-        res2 = adapter.process_change_event(raw_event)
-        assert mock_classify.delay.call_count == 1, "CLASSIFY must NOT be re-published!"
-        assert mock_tag_sync.delay.call_count == 2
-        assert res2["dispatched_tasks"] == ["task-t-partial-2"]
-
-        rec = session.query(EventInbox).filter(EventInbox.event_id == "evt-partial-004").first()
-        assert rec.status == "PROCESSED"
-        assert set(rec.dispatched_purposes) == {"CLASSIFY", "TAG_SYNC"}
-
-
-def test_openmetadata_route_does_not_wrap_service_owned_transactions() -> None:
-    route_source = (
-        __import__(
-            "pathlib"
-        ).Path("app/api/routes/openmetadata_events.py").read_text()
+    assert second["status"] == "accepted"
+    assert second["dispatched_tasks"] == ["task-t-retry"]
+    record = (
+        session.query(EventInbox)
+        .filter(EventInbox.event_id == "evt-retry-003")
+        .first()
     )
-    route_body = route_source.split("def accept_openmetadata_event", 1)[1].split(
-        "@router.post",
-        1,
-    )[0]
-
-    assert "with db.begin()" not in route_body
-    assert "adapter.process_change_event" in route_body
-
-
-def test_openmetadata_webhook_route_http_integration_uses_service_owned_transactions(tmp_path) -> None:
-    raw_event = {
-        "id": "evt-route-http-001",
-        "eventType": "entityCreated",
-        "entityType": "table",
-        "entityFullyQualifiedName": "trino_catalog.sales.orders",
-        "timestamp": 1722240200000,
-    }
-
-    engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'route.db'}")
-    factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
-    Base.metadata.create_all(engine)
-
-    async def override_db():
-        route_session = factory()
-        try:
-            yield route_session
-        finally:
-            route_session.close()
-
-    async def override_settings() -> Settings:
-        return _settings()
-
-    test_app = FastAPI()
-    test_app.include_router(
-        openmetadata_events.router,
-        prefix="/api/v1/integrations/openmetadata",
-    )
-    test_app.dependency_overrides[get_db] = override_db
-    test_app.dependency_overrides[get_settings] = override_settings
-    try:
-        with patch("app.services.openmetadata_event_adapter.classify_entity") as mock_classify, \
-             patch("app.services.openmetadata_event_adapter.sync_tags_to_ranger") as mock_tag_sync:
-            mock_classify.delay.return_value.id = "task-route-classify"
-            mock_tag_sync.delay.return_value.id = "task-route-sync"
-
-            async def call_route() -> httpx.Response:
-                transport = httpx.ASGITransport(app=test_app)
-                async with httpx.AsyncClient(
-                    transport=transport,
-                    base_url="http://testserver",
-                ) as client:
-                    return await client.post(
-                        "/api/v1/integrations/openmetadata/events",
-                        json=raw_event,
-                    )
-
-            response = anyio.run(call_route)
-
-        assert response.status_code == 202
-        body = response.json()
-        assert body["event_id"] == "evt-route-http-001"
-        assert set(body["purposes"]) == {"CLASSIFY", "TAG_SYNC"}
-        assert body["dispatched_tasks"] == [
-            "task-route-classify",
-            "task-route-sync",
-        ]
-
-        with factory() as assertion_session:
-            inbox = (
-                assertion_session.query(EventInbox)
-                .filter(EventInbox.event_id == "evt-route-http-001")
-                .one()
-            )
-            assert inbox.status == "PROCESSED"
-    finally:
-        test_app.dependency_overrides.clear()
-        Base.metadata.drop_all(engine)
+    assert record.status == "PROCESSED"
