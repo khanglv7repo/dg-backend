@@ -184,8 +184,18 @@ class Settings(BaseSettings):
     outbox_dispatch_poll_seconds: float = Field(default=5.0, gt=0)
     outbox_max_dispatch_attempts: int = Field(default=5, ge=1)
 
-    # R8 DQ TestCase creation registry (I1 coordination/crash-recovery).
+    # DQ governance/materialization/execution coordination.
     dq_registry_reservation_ttl_seconds: int = Field(default=120, ge=1)
+    dq_runner_url: str = Field(
+        default="http://metadata-ingestion:8080",
+        validation_alias=AliasChoices("DQ_RUNNER_URL"),
+    )
+    dq_runner_timeout_seconds: float = Field(
+        default=600.0,
+        gt=0,
+        le=3600,
+        validation_alias=AliasChoices("DQ_RUNNER_TIMEOUT_SECONDS"),
+    )
 
     # I11 kill switches: independent, per-path feature flags. Both default OFF
     # per docs/13_IMPLEMENTATION_SPEC.md section 9 rollout sequence.
