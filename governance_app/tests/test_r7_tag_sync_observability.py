@@ -1,7 +1,5 @@
 from unittest.mock import create_autospec, patch
 
-import pytest
-from fastmcp.exceptions import ToolError
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -131,16 +129,5 @@ def test_mcp_tag_sync_observability_does_not_equate_processed_with_synchronized(
     engine.dispose()
 
 
-def test_mcp_activation_rejects_unconfirmed_before_authority_or_ranger_access() -> None:
-    with patch.object(backend_mcp_server, "get_settings") as get_settings, patch.object(
-        backend_mcp_server, "build_resource_ranger_client"
-    ) as build_ranger:
-        with pytest.raises(ToolError, match="CONFIRMATION_REQUIRED"):
-            backend_mcp_server.activate_policy_version.fn(
-                policy_key="sales.customer",
-                version=1,
-                confirmed=False,
-            )
-
-    get_settings.assert_not_called()
-    build_ranger.assert_not_called()
+def test_mcp_does_not_expose_policy_activation() -> None:
+    assert not hasattr(backend_mcp_server, "activate_policy_version")
