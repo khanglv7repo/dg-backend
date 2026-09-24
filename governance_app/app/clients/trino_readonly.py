@@ -154,10 +154,17 @@ class TrinoReadonlyClient:
             raise
         except Exception as exc:
             retryable = self._retryable_exception(exc)
+            error_name = getattr(exc, "error_name", None)
+            error_type = getattr(exc, "error_type", None)
             raise ExternalSystemError(
                 "Trino read-only diagnostic query failed",
                 system="trino",
                 retryable=retryable,
+                details={
+                    "error_name": str(error_name) if error_name else None,
+                    "error_type": str(error_type) if error_type else None,
+                    "exception_type": type(exc).__name__,
+                },
             ) from exc
         finally:
             if cursor is not None:
