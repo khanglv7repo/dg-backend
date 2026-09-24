@@ -127,6 +127,7 @@ class TestCaseRegistryRepository:
             row
             for row in self.session.query(TestCaseRegistry)
             .filter(TestCaseRegistry.reservation_state == "RESERVED")
+            .filter(TestCaseRegistry.lifecycle_state != "APPROVED")
             .all()
             if row.reserved_at.timestamp() < cutoff
         ]
