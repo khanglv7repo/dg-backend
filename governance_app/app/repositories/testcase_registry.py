@@ -16,6 +16,9 @@ class TestCaseRegistryRepository:
     def __init__(self, session: Session) -> None:
         self.session = session
 
+    def get(self, record_id) -> TestCaseRegistry | None:
+        return self.session.get(TestCaseRegistry, record_id)
+
     def get_by_natural_key_hash(self, natural_key_hash: str) -> TestCaseRegistry | None:
         return (
             self.session.query(TestCaseRegistry)
@@ -118,3 +121,31 @@ class TestCaseRegistryRepository:
                 f"natural_key_hash {record.natural_key_hash!r} is already reserved "
                 f"by worker {record.worker_id!r}"
             )
+
+    def approve(self, record_id, *, actor_id: str) -> TestCaseRegistry:
+        """Explicit human/operator STAGED -> APPROVED transition.
+
+        Approval never makes the TestCase executable and never invokes
+        OpenMetadata. That separate transition requires a verified executable
+        TestSuite API contract.
+        """
+        record = self.session.get(TestCaseRegistry, record_id)
+        if record is None:
+            raise ConflictError(f"testcase registry row {record_id!r} was not found")
+        if record.reservation_state != "CONFIRMED":
+            raise ConflictError(
+                f"testcase {record_id!r} cannot be approved while reservation_state="
+                f"{record.reservation_state!r}"
+            )
+        if record.lifecycle_state == "APPROVED":
+            return record
+        if record.lifecycle_state != "STAGED":
+            raise ConflictError(
+                f"testcase {record_id!r} cannot transition from "
+                f"{record.lifecycle_state!r} to APPROVED"
+            )
+        record.lifecycle_state = "APPROVED"
+        record.approved_at = utcnow()
+        record.approved_by = actor_id
+        self.session.flush()
+        return record
