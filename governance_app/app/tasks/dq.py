@@ -236,6 +236,7 @@ def recover_testcase_registry() -> dict:
     reconciled = 0
     still_missing = 0
     redispatched = 0
+    run_redispatched = 0
 
     with SessionLocal() as session:
         repository = TestCaseRegistryRepository(session)
@@ -247,6 +248,19 @@ def recover_testcase_registry() -> dict:
         for record in approved:
             materialize_approved_test_case.delay(registry_id=str(record.id))
             redispatched += 1
+
+        stale_runs = repository.run_recovery_candidates(
+            queued_stale_after_seconds=settings.dq_registry_reservation_ttl_seconds,
+            running_stale_after_seconds=(
+                int(settings.dq_runner_timeout_seconds) + 60
+            ),
+        )
+        for record in stale_runs:
+            run_executable_test_case.delay(
+                registry_id=str(record.id),
+                run_id=str(record.active_run_id),
+            )
+            run_redispatched += 1
 
         # Compatibility recovery for rows created under the old direct-create
         # architecture. These RESERVED rows may represent an OM create that
@@ -267,11 +281,17 @@ def recover_testcase_registry() -> dict:
                         name=record.natural_key_hash,
                     )
                     if observed is not None and observed.get("testSuite"):
+                        test_suite = observed.get("testSuite") or {}
                         repository.mark_executable(
                             record.id,
                             om_testcase_id=str(observed.get("id") or ""),
                             om_testcase_fqn=str(
                                 observed.get("fullyQualifiedName") or ""
+                            ),
+                            om_test_suite_fqn=str(
+                                test_suite.get("fullyQualifiedName")
+                                or test_suite.get("name")
+                                or ""
                             ),
                         )
                         session.commit()
@@ -292,4 +312,5 @@ def recover_testcase_registry() -> dict:
         "reconciled": reconciled,
         "still_missing": still_missing,
         "redispatched": redispatched,
+        "run_redispatched": run_redispatched,
     }
