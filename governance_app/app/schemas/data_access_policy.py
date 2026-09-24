@@ -238,6 +238,9 @@ class ProjectionResponse(ORMModel):
     created_at: datetime
     updated_at: datetime
     last_reconciled_at: datetime | None
+    verification_status: str
+    verification_details: dict[str, Any]
+    last_verified_at: datetime | None
 
 
 class PreviewProjection(BaseModel):
