@@ -1,13 +1,8 @@
-"""EventPurposeRouter determines whether an OpenMetadata event triggers classification, tag sync, both, or none.
+"""Route OpenMetadata ChangeEvents only to governance runtime work.
 
-Routing Rules:
-- Tag-only change -> {TAG_SYNC} (MUST NOT re-run classification to prevent event loops!)
-- Classification-input change (description, name, dataType) -> {CLASSIFY}
-- Column structural change (add/remove/rename column) -> {CLASSIFY, TAG_SYNC}
-- Mixed structural + tag change -> {CLASSIFY, TAG_SYNC}
-- Mixed classification-input + tag change -> {CLASSIFY, TAG_SYNC}
-- Unrelated metadata (owner, followers, extension) -> {}
-- entityCreated -> {CLASSIFY, TAG_SYNC}
+Backend-owned classification has been retired. OpenMetadata remains the
+metadata/tag authority; Backend only reacts to tag changes that must be
+propagated to Ranger.
 """
 from __future__ import annotations
 
@@ -16,16 +11,11 @@ from typing import Any
 
 
 class EventPurpose(StrEnum):
-    CLASSIFY = "CLASSIFY"
     TAG_SYNC = "TAG_SYNC"
 
 
 class EventPurposeRouter:
-    """Pure router mapping raw OpenMetadata ChangeEvent structures to logical EventPurposes."""
-
-    CLASSIFICATION_FIELDS = frozenset(
-        {"description", "name", "datatype", "data_type", "sampledata", "sample_values"}
-    )
+    """Pure router mapping raw OpenMetadata ChangeEvents to runtime purposes."""
 
     @classmethod
     def route(cls, event_data: dict[str, Any]) -> set[EventPurpose]:
@@ -34,29 +24,18 @@ class EventPurposeRouter:
         if not event_type:
             return set()
 
+        # New assets have no Backend classification step. A tag sync is still
+        # harmless/idempotent and lets Ranger converge if OM already assigned
+        # native/manual tags during creation.
         if event_type == "entitycreated":
-            return {EventPurpose.CLASSIFY, EventPurpose.TAG_SYNC}
+            return {EventPurpose.TAG_SYNC}
 
         change_desc = event_data.get("changeDescription") or {}
         inc_change_desc = event_data.get("incrementalChangeDescription") or {}
 
-        has_tag = cls._has_tag_change(change_desc) or cls._has_tag_change(inc_change_desc)
-        has_column_struct = cls._has_column_structural_change(change_desc) or cls._has_column_structural_change(inc_change_desc)
-        has_classify_input = cls._has_classification_input_change(change_desc) or cls._has_classification_input_change(inc_change_desc)
-
-        purposes: set[EventPurpose] = set()
-
-        if has_column_struct:
-            purposes.add(EventPurpose.CLASSIFY)
-            purposes.add(EventPurpose.TAG_SYNC)
-
-        if has_classify_input:
-            purposes.add(EventPurpose.CLASSIFY)
-
-        if has_tag:
-            purposes.add(EventPurpose.TAG_SYNC)
-
-        return purposes
+        if cls._has_tag_change(change_desc) or cls._has_tag_change(inc_change_desc):
+            return {EventPurpose.TAG_SYNC}
+        return set()
 
     @classmethod
     def _has_tag_change(cls, change_desc: dict[str, Any]) -> bool:
@@ -73,30 +52,6 @@ class EventPurposeRouter:
                 if cls._contains_tag_payload(change.get("oldValue")):
                     return True
                 if cls._contains_tag_payload(change.get("newValue")):
-                    return True
-        return False
-
-    @classmethod
-    def _has_column_structural_change(cls, change_desc: dict[str, Any]) -> bool:
-        for bucket in ("fieldsAdded", "fieldsUpdated", "fieldsDeleted"):
-            changes = change_desc.get(bucket, []) or []
-            for change in changes:
-                if not isinstance(change, dict):
-                    continue
-                name = str(change.get("name") or "").lower()
-                if name in ("columns", "schema", "tables"):
-                    return True
-        return False
-
-    @classmethod
-    def _has_classification_input_change(cls, change_desc: dict[str, Any]) -> bool:
-        for bucket in ("fieldsAdded", "fieldsUpdated", "fieldsDeleted"):
-            changes = change_desc.get(bucket, []) or []
-            for change in changes:
-                if not isinstance(change, dict):
-                    continue
-                name = str(change.get("name") or "").lower()
-                if any(field in name for field in cls.CLASSIFICATION_FIELDS):
                     return True
         return False
 
