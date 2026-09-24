@@ -43,16 +43,19 @@ class EventOutboxRepository:
         return record
 
     def claim_pending(self, *, batch_size: int) -> list[EventOutbox]:
-        """Fetch PENDING rows for a dispatcher pass. Not a distributed lock --
-        this deployment runs a single dispatcher instance (per D1 finding
-        precedent: single-writer avoids race conditions cheaply when the
-        workload doesn't require distributed coordination).
+        """Claim PENDING rows for one dispatcher transaction.
+
+        PostgreSQL uses FOR UPDATE SKIP LOCKED so overlapping Celery deliveries
+        cannot publish the same row concurrently. A crash after publish but
+        before mark_dispatched can still cause a later duplicate, which is the
+        intentional at-least-once transport contract.
         """
         stmt = (
             select(EventOutbox)
             .where(EventOutbox.status == "PENDING")
             .order_by(EventOutbox.created_at.asc())
             .limit(batch_size)
+            .with_for_update(skip_locked=True)
         )
         return list(self.session.execute(stmt).scalars())
 
