@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import uuid
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -191,7 +192,8 @@ class DQService:
                 system="openmetadata",
                 retryable=True,
             )
-        if not observed.get("testSuite"):
+        test_suite = observed.get("testSuite")
+        if not isinstance(test_suite, dict):
             raise ExternalSystemError(
                 "OpenMetadata TestCase is not linked to a Basic TestSuite",
                 system="openmetadata",
@@ -200,9 +202,15 @@ class DQService:
 
         om_testcase_id = str(observed.get("id") or "")
         om_testcase_fqn = str(observed.get("fullyQualifiedName") or "")
-        if not om_testcase_id or not om_testcase_fqn:
+        om_test_suite_fqn = str(
+            test_suite.get("fullyQualifiedName") or test_suite.get("name") or ""
+        )
+        if not om_testcase_id or not om_testcase_fqn or not om_test_suite_fqn:
             raise ExternalSystemError(
-                "OpenMetadata TestCase read-back is missing id or fullyQualifiedName",
+                (
+                    "OpenMetadata TestCase read-back is missing id, "
+                    "fullyQualifiedName, or Basic TestSuite FQN"
+                ),
                 system="openmetadata",
                 retryable=True,
             )
@@ -211,9 +219,126 @@ class DQService:
             record.id,
             om_testcase_id=om_testcase_id,
             om_testcase_fqn=om_testcase_fqn,
+            om_test_suite_fqn=om_test_suite_fqn,
         )
         self.session.commit()
         return self._result(record)
+
+    def prepare_run(
+        self,
+        *,
+        registry_id: str,
+        actor_id: str,
+    ) -> dict[str, Any]:
+        identifier = self._uuid(registry_id)
+        record, run_id = self.registry.prepare_run(
+            identifier,
+            actor_id=actor_id,
+        )
+        self.session.commit()
+        return {
+            **self._result(record),
+            "run_id": str(run_id),
+            "run_status": record.last_run_status,
+        }
+
+    def mark_run_started(
+        self,
+        *,
+        registry_id: str,
+        run_id: str,
+    ) -> dict[str, Any]:
+        record = self.registry.mark_run_started(
+            self._uuid(registry_id),
+            run_id=self._uuid(run_id),
+        )
+        self.session.commit()
+        return self._result(record)
+
+    def latest_result_for_active_run(
+        self,
+        *,
+        registry_id: str,
+        run_id: str,
+    ) -> dict[str, Any] | None:
+        if self.om_client is None:
+            raise ValidationError("OpenMetadata client is required for DQ result read-back")
+        record = self.registry.get(self._uuid(registry_id))
+        if record is None:
+            raise ConflictError(f"testcase registry row {registry_id!r} was not found")
+        requested_run_id = self._uuid(run_id)
+        if record.active_run_id != requested_run_id:
+            raise ConflictError(
+                f"DQ run {run_id} is stale; active run is {record.active_run_id}"
+            )
+        if not record.om_testcase_fqn or record.last_run_started_at is None:
+            return None
+
+        observed = self.om_client.get_test_case_by_name(
+            record.om_testcase_fqn,
+            fields="testCaseResult,testSuite",
+        )
+        result = observed.get("testCaseResult")
+        if not isinstance(result, dict):
+            return None
+
+        timestamp = self._result_timestamp(result)
+        started_at = record.last_run_started_at
+        if started_at.tzinfo is None:
+            started_at = started_at.replace(tzinfo=UTC)
+        if timestamp < started_at:
+            return None
+        return dict(result)
+
+    def complete_run(
+        self,
+        *,
+        registry_id: str,
+        run_id: str,
+        result: dict[str, Any],
+    ) -> dict[str, Any]:
+        record = self.registry.mark_run_completed(
+            self._uuid(registry_id),
+            run_id=self._uuid(run_id),
+            result=result,
+        )
+        self.session.commit()
+        return self._result(record)
+
+    def fail_run(
+        self,
+        *,
+        registry_id: str,
+        run_id: str,
+        error: str,
+    ) -> dict[str, Any]:
+        record = self.registry.mark_run_failed(
+            self._uuid(registry_id),
+            run_id=self._uuid(run_id),
+            error=error,
+        )
+        self.session.commit()
+        return self._result(record)
+
+    def get(self, *, registry_id: str) -> dict[str, Any]:
+        record = self.registry.get(self._uuid(registry_id))
+        if record is None:
+            raise ConflictError(f"testcase registry row {registry_id!r} was not found")
+        return self._result(record)
+
+    @staticmethod
+    def _result_timestamp(result: dict[str, Any]) -> datetime:
+        raw = result.get("timestamp")
+        if isinstance(raw, bool) or not isinstance(raw, (int, float, str)):
+            raise ValidationError("OpenMetadata testCaseResult timestamp is missing")
+        try:
+            value = float(raw)
+        except (TypeError, ValueError) as exc:
+            raise ValidationError(
+                "OpenMetadata testCaseResult timestamp is invalid"
+            ) from exc
+        # OpenMetadata timestamps are epoch milliseconds.
+        return datetime.fromtimestamp(value / 1000.0, tz=UTC)
 
     @staticmethod
     def _uuid(value: str) -> uuid.UUID:
@@ -228,5 +353,16 @@ class DQService:
             "id": str(record.id),
             "natural_key_hash": record.natural_key_hash,
             "om_testcase_id": record.om_testcase_id,
+            "om_test_suite_fqn": record.om_test_suite_fqn,
             "status": record.lifecycle_state,
+            "run_generation": int(record.run_generation or 0),
+            "run_id": (
+                str(record.active_run_id) if record.active_run_id else None
+            ),
+            "run_status": record.last_run_status,
+            "run_started_at": record.last_run_started_at,
+            "run_finished_at": record.last_run_finished_at,
+            "run_requested_by": record.last_run_requested_by,
+            "run_error": record.last_run_error,
+            "last_result": dict(record.last_result or {}),
         }
