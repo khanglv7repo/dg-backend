@@ -23,6 +23,7 @@ stable_test_slot_id = rule_id + "::" + test_key if test_key else rule_id
 from __future__ import annotations
 
 import hashlib
+import uuid
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -118,7 +119,7 @@ class DQService:
                     "id": str(record.id),
                     "natural_key_hash": natural_key_hash,
                     "om_testcase_id": record.om_testcase_id,
-                    "status": "STAGED",
+                    "status": record.lifecycle_state,
                 }
             if record.reservation_state == "FAILED":
                 # Found live during TASK-08's audit: a transient failure
@@ -177,5 +178,31 @@ class DQService:
             "id": str(record.id),
             "natural_key_hash": natural_key_hash,
             "om_testcase_id": om_testcase_id,
-            "status": "STAGED",
+            "status": record.lifecycle_state,
+        }
+
+    def approve_staged_test_case(
+        self,
+        *,
+        registry_id: str,
+        actor_id: str,
+    ) -> dict[str, Any]:
+        """Human/operator approval only: STAGED -> APPROVED.
+
+        This method deliberately does not attach an executable TestSuite and
+        does not schedule a run. APPROVED is governance intent; EXECUTABLE
+        requires a separately verified OpenMetadata 2.0.2 API contract.
+        """
+        try:
+            identifier = uuid.UUID(str(registry_id))
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise ValidationError("registry_id must be a UUID") from exc
+
+        record = self.registry.approve(identifier, actor_id=actor_id)
+        self.session.commit()
+        return {
+            "id": str(record.id),
+            "natural_key_hash": record.natural_key_hash,
+            "om_testcase_id": record.om_testcase_id,
+            "status": record.lifecycle_state,
         }
