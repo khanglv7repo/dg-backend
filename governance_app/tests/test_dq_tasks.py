@@ -82,6 +82,15 @@ def test_legacy_staged_reserved_row_reconciles_existing_om_testcase() -> None:
             "fullyQualifiedName": "dev.sales.customer.testSuite",
         },
     }
+    om.get_test_suite_by_name.return_value = {
+        "id": "suite-1",
+        "fullyQualifiedName": "dev.sales.customer.testSuite",
+        "basic": True,
+        "basicEntityReference": {
+            "type": "table",
+            "fullyQualifiedName": "dev.sales.customer",
+        },
+    }
 
     settings = SimpleNamespace(
         dq_registry_reservation_ttl_seconds=120,
@@ -237,3 +246,58 @@ def test_recovery_redispatches_stale_run_with_same_run_id() -> None:
 
     delay.assert_called_once_with(registry_id="r1", run_id="run-1")
     assert result["run_redispatched"] == 1
+
+
+def test_legacy_recovery_never_marks_logical_suite_executable() -> None:
+    session = MagicMock()
+    repository = MagicMock()
+    repository.approved_materialization_candidates.return_value = []
+    legacy = SimpleNamespace(
+        id="legacy-logical",
+        natural_key_hash="dg_legacy_logical",
+        target_entity_fqn="dev.sales.customer",
+        lifecycle_state="STAGED",
+        spec_payload={},
+    )
+    repository.crash_recovery_candidates.return_value = [legacy]
+    repository.run_recovery_candidates.return_value = []
+
+    om = MagicMock()
+    om.find_test_case_by_entity_and_name.return_value = {
+        "id": "om-legacy-logical",
+        "fullyQualifiedName": "dev.sales.customer.dg_legacy_logical",
+        "testSuite": {
+            "id": "suite-logical",
+            "fullyQualifiedName": "logical.quality.suite",
+        },
+    }
+    om.get_test_suite_by_name.return_value = {
+        "id": "suite-logical",
+        "fullyQualifiedName": "logical.quality.suite",
+        "basic": False,
+        "executable": False,
+    }
+
+    settings = SimpleNamespace(
+        dq_registry_reservation_ttl_seconds=120,
+        dq_runner_timeout_seconds=600,
+        openmetadata_execution_bot_token=None,
+        openmetadata_base_url="http://om/api",
+        openmetadata_timeout_seconds=10,
+    )
+
+    with patch.object(
+        dq_task, "SessionLocal", return_value=_session_cm(session)
+    ), patch.object(
+        dq_task, "TestCaseRegistryRepository", return_value=repository
+    ), patch.object(
+        dq_task, "_execution_om_client", return_value=om
+    ), patch.object(
+        dq_task, "get_settings", return_value=settings
+    ):
+        result = dq_task.recover_testcase_registry.run()
+
+    repository.mark_executable.assert_not_called()
+    repository.mark_failed.assert_called_once_with("legacy-logical")
+    assert result["reconciled"] == 0
+    assert result["still_missing"] == 1
