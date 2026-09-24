@@ -71,5 +71,4 @@ app.conf.imports = (
     "app.tasks.policy_sync",
     "app.tasks.recovery",
     "app.tasks.tag_sync",
-    "app.tasks.task_resolution",
 )
