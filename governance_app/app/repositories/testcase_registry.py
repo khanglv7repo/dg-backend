@@ -34,6 +34,7 @@ class TestCaseRegistryRepository:
         test_definition_fqn: str,
         stable_test_slot_id: str,
         worker_id: str,
+        spec_payload: dict,
     ) -> tuple[TestCaseRegistry, bool]:
         """Attempt to reserve a natural_key_hash for this worker.
 
@@ -55,6 +56,7 @@ class TestCaseRegistryRepository:
             stable_test_slot_id=stable_test_slot_id,
             reservation_state="RESERVED",
             worker_id=worker_id,
+            spec_payload=spec_payload,
         )
         try:
             self.session.add(record)
@@ -132,7 +134,7 @@ class TestCaseRegistryRepository:
         record = self.session.get(TestCaseRegistry, record_id)
         if record is None:
             raise ConflictError(f"testcase registry row {record_id!r} was not found")
-        if record.reservation_state != "CONFIRMED":
+        if record.reservation_state not in {"RESERVED", "CONFIRMED"}:
             raise ConflictError(
                 f"testcase {record_id!r} cannot be approved while reservation_state="
                 f"{record.reservation_state!r}"
@@ -149,3 +151,33 @@ class TestCaseRegistryRepository:
         record.approved_by = actor_id
         self.session.flush()
         return record
+
+
+    def mark_executable(
+        self,
+        record_id,
+        *,
+        om_testcase_id: str,
+        om_testcase_fqn: str,
+    ) -> TestCaseRegistry:
+        record = self.session.get(TestCaseRegistry, record_id)
+        if record is None:
+            raise ConflictError(f"testcase registry row {record_id!r} was not found")
+        if record.lifecycle_state not in {"APPROVED", "EXECUTABLE"}:
+            raise ConflictError(
+                f"testcase {record_id!r} cannot materialize from "
+                f"{record.lifecycle_state!r}"
+            )
+        record.reservation_state = "CONFIRMED"
+        record.om_testcase_id = om_testcase_id
+        record.om_testcase_fqn = om_testcase_fqn
+        record.confirmed_at = utcnow()
+        record.lifecycle_state = "EXECUTABLE"
+        self.session.flush()
+        return record
+
+    def mark_materialization_failed(self, record_id) -> None:
+        record = self.session.get(TestCaseRegistry, record_id)
+        if record is not None and record.lifecycle_state == "APPROVED":
+            record.reservation_state = "FAILED"
+            self.session.flush()
