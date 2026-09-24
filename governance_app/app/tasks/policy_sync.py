@@ -7,6 +7,7 @@ from app.celery_app import app
 from app.core.config import get_settings
 from app.core.errors import ExternalSystemError
 from app.db.session import SessionLocal
+from app.repositories.audit import AuditRepository
 from app.services.policy_reconciliation import PolicyReconciliationService
 from app.services.policy_verification import PolicyRuntimeVerificationService
 from app.services.ranger_client_factory import build_resource_ranger_client
@@ -130,19 +131,61 @@ def verify_trino_policy_enforcement() -> dict:
             }
 
         verifier = PolicyRuntimeVerificationService(settings)
+        audit = AuditRepository(db)
         counts: Counter[str] = Counter()
 
         for projection, version in rows:
+            previous_status = str(
+                projection.verification_status or "UNVERIFIED"
+            )
             logical = LogicalDataAccessPolicy.model_validate(version.logical_policy)
             result = verifier.verify(
                 logical_policy=logical,
                 projection_type=projection.projection_type,
                 ranger_apply_timestamp=projection.last_reconciled_at,
             )
-            projection.verification_status = str(result["status"])
+            current_status = str(result["status"])
+            projection.verification_status = current_status
             projection.verification_details = result
             projection.last_verified_at = utcnow()
-            counts[projection.verification_status] += 1
+            counts[current_status] += 1
+
+            audit_details = {
+                "policy_version_id": str(version.id),
+                "policy_key": version.policy_key,
+                "projection_id": str(projection.id),
+                "projection_type": projection.projection_type,
+                "ranger_policy_name": projection.ranger_policy_name,
+                "previous_status": previous_status,
+                "current_status": current_status,
+                "verification": result,
+            }
+            if (
+                current_status == "RUNTIME_DRIFT"
+                and previous_status != "RUNTIME_DRIFT"
+            ):
+                audit.record(
+                    actor_id="system:trino-policy-verifier",
+                    actor_name="Trino Policy Runtime Verifier",
+                    action="RUNTIME_DRIFT_DETECTED",
+                    object_type="ranger_policy_projection",
+                    object_id=str(projection.id),
+                    correlation_id=None,
+                    details=audit_details,
+                )
+            elif (
+                previous_status == "RUNTIME_DRIFT"
+                and current_status == "VERIFICATION_CONFIRMED"
+            ):
+                audit.record(
+                    actor_id="system:trino-policy-verifier",
+                    actor_name="Trino Policy Runtime Verifier",
+                    action="RUNTIME_DRIFT_RESOLVED",
+                    object_type="ranger_policy_projection",
+                    object_id=str(projection.id),
+                    correlation_id=None,
+                    details=audit_details,
+                )
 
         db.commit()
 
