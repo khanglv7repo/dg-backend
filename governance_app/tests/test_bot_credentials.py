@@ -27,3 +27,13 @@ def test_remaining_openmetadata_worker_tokens_must_be_distinct() -> None:
             OM_AUTO_TAG_BOT_TOKEN=SecretStr("same-token"),
             OM_INGESTION_BOT_TOKEN=SecretStr("same-token"),
         )
+
+
+def test_execution_bot_token_accepts_infrastructure_env_name(monkeypatch) -> None:
+    monkeypatch.setenv("OM_EXECUTION_BOT_TOKEN", "execution-token")
+    settings = Settings(_env_file=None)
+    assert settings.openmetadata_execution_bot_token is not None
+    assert (
+        settings.openmetadata_execution_bot_token.get_secret_value()
+        == "execution-token"
+    )
