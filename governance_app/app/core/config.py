@@ -128,6 +128,15 @@ class Settings(BaseSettings):
         ),
     )
     trino_readonly_password: SecretStr | None = None
+    trino_verification_control_user: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("TRINO_VERIFICATION_CONTROL_USER"),
+    )
+    trino_verification_control_password: SecretStr | None = Field(
+        default=None,
+        validation_alias=AliasChoices("TRINO_VERIFICATION_CONTROL_PASSWORD"),
+    )
+    trino_verification_sample_rows: int = Field(default=20, ge=1, le=100)
     trino_readonly_catalog: str | None = Field(
         default=None,
         validation_alias=AliasChoices("TRINO_READONLY_CATALOG", "TRINO_CATALOG"),
@@ -222,6 +231,15 @@ class Settings(BaseSettings):
         if self.openmetadata_execution_bot_name == self.openmetadata_agent_bot_name:
             raise ValueError(
                 "OpenMetadata execution and agent bots must be different machine identities"
+            )
+
+        if (
+            self.trino_verification_control_user
+            and self.trino_readonly_user
+            and self.trino_verification_control_user == self.trino_readonly_user
+        ):
+            raise ValueError(
+                "Trino verification control user must differ from the policy verification user"
             )
 
         worker_tokens = [
