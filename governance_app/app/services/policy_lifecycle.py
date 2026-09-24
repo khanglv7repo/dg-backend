@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -8,12 +7,9 @@ from sqlalchemy.orm import Session
 
 from app.clients.ranger import RangerClient
 from app.core.config import Settings
-from app.core.errors import ConfigurationError, ExternalSystemError, NotFoundError
+from app.core.errors import ConfigurationError
 from app.repositories.event_outbox import EventOutboxRepository
 from app.services.data_access_policy import DataAccessPolicyService
-from app.tasks.policy_sync import sync_policy_to_ranger
-
-DispatchFn = Callable[[str, str | None], str | None]
 
 
 @dataclass(frozen=True)
@@ -23,24 +19,6 @@ class PolicyLifecycleResult:
     dispatched: bool
     task_id: str | None
 
-
-def dispatch_policy_sync(policy_version_id: str, correlation_id: str | None = None) -> str | None:
-    """Publish existing R4 reconciliation only after durable authority is committed."""
-
-    try:
-        task = sync_policy_to_ranger.delay(
-            policy_version_id=policy_version_id,
-            correlation_id=correlation_id,
-        )
-    except Exception as exc:
-        raise ExternalSystemError(
-            "policy authority is durable but Celery reconciliation publish failed; "
-            "retry the same ACTIVE version or request sync",
-            system="celery",
-            retryable=True,
-            details={"policy_version_id": policy_version_id},
-        ) from exc
-    return str(task.id) if getattr(task, "id", None) else None
 
 
 class PolicyLifecycleService:
@@ -52,12 +30,10 @@ class PolicyLifecycleService:
         settings: Settings,
         *,
         ranger_client: RangerClient | None = None,
-        dispatcher: DispatchFn = dispatch_policy_sync,
     ) -> None:
         self.session = session
         self.settings = settings
         self.ranger_client = ranger_client
-        self.dispatcher = dispatcher
 
     def activate(
         self,
@@ -188,29 +164,3 @@ class PolicyLifecycleService:
             )
         return self.ranger_client
 
-    def request_sync(
-        self,
-        *,
-        policy_key: str,
-        correlation_id: str | None = None,
-    ) -> dict:
-        # Technical reconciliation only: no new policy version and no authority write.
-        with self.session.begin():
-            active, _projections = DataAccessPolicyService(
-                self.session,
-                self.settings,
-            ).status(policy_key=policy_key)
-            if active is None:
-                raise NotFoundError(f"policy {policy_key!r} has no ACTIVE version")
-            version_id = str(active.id)
-            version = int(active.version)
-
-        task_id = self.dispatcher(version_id, correlation_id)
-        return {
-            "policy_key": policy_key,
-            "version": version,
-            "policy_version_id": version_id,
-            "authority_changed": False,
-            "dispatched": True,
-            "task_id": task_id,
-        }
