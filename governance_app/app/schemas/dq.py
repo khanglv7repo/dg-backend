@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -26,5 +27,21 @@ class DQTestCaseResponse(ORMModel):
     id: str
     natural_key_hash: str
     om_testcase_id: str | None
+    om_test_suite_fqn: str | None = None
     status: Literal["STAGED", "APPROVED", "EXECUTABLE", "FAILED"]
     materialization_task_id: str | None = None
+    run_generation: int = 0
+    run_id: str | None = None
+    run_status: Literal["QUEUED", "RUNNING", "COMPLETED", "FAILED"] | None = None
+    run_started_at: datetime | None = None
+    run_finished_at: datetime | None = None
+    run_requested_by: str | None = None
+    run_error: str | None = None
+    last_result: dict[str, Any] = Field(default_factory=dict)
+
+
+class DQRunAcceptedResponse(BaseModel):
+    registry_id: str
+    run_id: str
+    status: Literal["QUEUED"]
+    task_id: str | None = None
